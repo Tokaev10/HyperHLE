@@ -62,6 +62,15 @@ macro_rules! log_once {
     }};
 }
 
+macro_rules! log_once_fmt {
+    ($($arg:tt)+) => {{
+        static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+        LOG_ONCE.call_once(|| {
+            log!($($arg)+);
+        });
+    }};
+}
+
 /// Print a message (with implicit newline). This should be used for all
 /// touchHLE output that isn't coming from the app itself.
 ///
@@ -121,4 +130,5 @@ pub const ENABLED_MODULES: &[&str] = &[
     "touchHLE::frameworks::foundation::ns_run_loop",
     "touchHLE::frameworks::core_animation::ca_display_link",
     "touchHLE::libc::posix_io",
+    "touchHLE::environment64",
 ];
