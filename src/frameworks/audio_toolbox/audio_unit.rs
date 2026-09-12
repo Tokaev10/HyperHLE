@@ -19,6 +19,7 @@ use crate::environment::Environment;
 use crate::export_c_func;
 use crate::frameworks::audio_toolbox::audio_components;
 use crate::frameworks::audio_toolbox::audio_queue::log_if_broken_audio_format;
+use crate::media_capture;
 use crate::frameworks::carbon_core::{paramErr, OSStatus};
 use crate::frameworks::core_audio_types::{
     fourcc, kAudioFormatFlagIsNonInterleaved, AudioStreamBasicDescription,
@@ -940,10 +941,55 @@ fn AudioUnitRender(
     in_unit: AudioUnit,
     _f: MutPtr<u32>,
     _t: ConstVoidPtr,
-    _b: u32,
-    _n: u32,
-    _d: MutVoidPtr,
+    output_bus: u32,
+    frames: u32,
+    io_data: MutVoidPtr,
 ) -> OSStatus {
+    let input_format = audio_components::State::get(&mut env.framework_state)
+        .audio_component_instances
+        .get(&in_unit)
+        .and_then(|instance| instance.input_stream_format);
+    if output_bus != 0 && input_format.is_some() && !io_data.is_null() {
+        let format = input_format.unwrap();
+        let mut list = env.mem.read::<AudioBufferList<1>, true>(io_data.cast());
+        let buffer = list.buffers[0];
+        if !buffer.data.is_null() {
+            let channels = format.channels_per_frame.max(1) as usize;
+            let bytes_per_sample = audio_bytes_per_sample(&format) as usize;
+            let bytes_per_frame = audio_bytes_per_frame(&format) as usize;
+            let requested = (frames as usize)
+                .saturating_mul(bytes_per_frame)
+                .min(buffer.data_byte_size as usize);
+            let native = media_capture::take_microphone_pcm(requested.max(4096));
+            let mut output = vec![0u8; requested];
+            for (frame, sample) in native.chunks_exact(2).enumerate() {
+                if frame >= frames as usize {
+                    break;
+                }
+                let sample = i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0;
+                for channel in 0..channels {
+                    let offset = frame
+                        .saturating_mul(bytes_per_frame)
+                        .saturating_add(channel.saturating_mul(bytes_per_sample));
+                    if offset + bytes_per_sample > output.len() {
+                        break;
+                    }
+                    match (format.bits_per_channel, format.format_flags & crate::frameworks::core_audio_types::kAudioFormatFlagIsFloat != 0) {
+                        (32, true) => output[offset..offset + 4].copy_from_slice(&sample.to_le_bytes()),
+                        (16, false) => output[offset..offset + 2].copy_from_slice(&((sample * 32767.0).round() as i16).to_le_bytes()),
+                        (8, false) => output[offset] = (sample * 127.0 + 128.0).round().clamp(0.0, 255.0) as u8,
+                        _ => {}
+                    }
+                }
+            }
+            env.mem
+                .bytes_at_mut(buffer.data.cast(), requested as u32)
+                .copy_from_slice(&output);
+            list.buffers[0].data_byte_size = requested as u32;
+            env.mem.write(io_data.cast(), list);
+        }
+        return 0;
+    }
     render_audio_unit(env, in_unit);
     0
 }

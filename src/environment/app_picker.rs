@@ -3251,12 +3251,11 @@ fn setup_quick_options(
     // readable row instead of being compressed into overlapping controls.
 
     let settings_background: id =
-        msg_class![env; UIColor colorWithRed:0.95 green:0.95 blue:0.97 alpha:1.0];
+        msg_class![env; UIColor grayColor];
     let settings_backdrop: id = msg_class![env; UIView alloc];
     let settings_backdrop: id = msg![env; settings_backdrop initWithFrame:visible_frame];
-    let clear: id = msg_class![env; UIColor clearColor];
-    () = msg![env; settings_backdrop setBackgroundColor:clear];
-    () = msg![env; settings_backdrop setOpaque:false];
+    () = msg![env; settings_backdrop setBackgroundColor:settings_background];
+    () = msg![env; settings_backdrop setOpaque:true];
     () = msg![env; settings_backdrop setUserInteractionEnabled:false];
     () = msg![env; settings_backdrop setHidden:true];
     () = msg![env; super_view addSubview:settings_backdrop];
@@ -3711,7 +3710,7 @@ fn setup_quick_options(
                     let button_frame = CGRect {
                         origin: CGPoint {
                             x: controls_x + margin + column as CGFloat * (button_width + margin),
-                            y: row_center - row_block_height / 2.0
+                            y: control_center - row_block_height / 2.0
                                 + row as CGFloat * (button_height + row_gap),
                         },
                         size: CGSize {
@@ -3935,7 +3934,7 @@ fn setup_quick_options(
     let max_category_rows = category_row_indices.iter().copied().max().unwrap_or(0);
     let settings_row_pairs = ((max_category_rows + 1) / 2).max(1);
     let settings_content_height =
-        divider + ((settings_row_pairs + 1) as CGFloat * 78.0 * ui_scale) + 34.0 * ui_scale;
+        divider + ((settings_row_pairs + 1) as CGFloat * settings_row_height) + 34.0 * ui_scale;
     () = msg![env; main_view setContentSize:(CGSize {
         width: main_frame.size.width,
         height: settings_content_height,
@@ -4348,7 +4347,7 @@ const GRAPHICS_API_ENTRIES: &[(&str, crate::options::GraphicsApi)] = &[
 ];
 
 fn settings_menu_gray(env: &mut Environment) -> id {
-    msg_class![env; UIColor colorWithRed:0.22 green:0.23 blue:0.26 alpha:1.0]
+    msg_class![env; UIColor grayColor]
 }
 
 fn settings_menu_selected_green(env: &mut Environment) -> id {
@@ -4356,7 +4355,7 @@ fn settings_menu_selected_green(env: &mut Environment) -> id {
 }
 
 fn settings_category_gray(env: &mut Environment) -> id {
-    msg_class![env; UIColor colorWithRed:0.88 green:0.88 blue:0.90 alpha:1.0]
+    msg_class![env; UIColor lightGrayColor]
 }
 
 fn update_graphics_api_dropdown(

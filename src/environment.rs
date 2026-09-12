@@ -1476,10 +1476,10 @@ impl Environment {
                     std::panic::resume_unwind(e);
                 }
             };
-            self.window
-                .as_mut()
-                .unwrap()
-                .poll_for_events(self.options.as_ref());
+            if let Some(window) = self.window.as_mut() {
+                window.on_main_stack = true;
+                window.poll_for_events(self.options.as_ref());
+            }
             assert!(self.threads.len() == 1);
             match self.threads[0].blocked_by {
                 ThreadBlock::NotBlocked => {}
@@ -1958,8 +1958,8 @@ impl Environment {
                 }
 
                 // Track repeated occurrences of the same bypass site.
-                const BYPASS_LIMIT: u32 = 256;
-                const LOG_RATE: u32 = 32;
+                const BYPASS_LIMIT: u32 = 32;
+                const LOG_RATE: u32 = 8;
                 let key = (pc, lr);
                 let count = if self.udf_bypass_last == Some(key) {
                     self.udf_bypass_count = self.udf_bypass_count.saturating_add(1);

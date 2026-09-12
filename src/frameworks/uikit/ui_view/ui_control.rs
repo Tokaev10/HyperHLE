@@ -283,6 +283,10 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     // TODO: unclear if this is meant to be affected by tracking
     send_actions(env, this, event, UIControlEventTouchDown);
+    let scroll_view = scroll_view_ancestor(env, this);
+    if scroll_view != nil {
+        () = msg![env; scroll_view touchesBegan:touches withEvent:event];
+    }
 }
 - (())touchesMoved:(id)touches // NSSet* of UITouch*
          withEvent:(id)event { // UIEvent*

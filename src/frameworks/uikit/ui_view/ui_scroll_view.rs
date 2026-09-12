@@ -49,6 +49,8 @@ pub struct UIScrollViewHostObject {
     keyboard_dismiss_mode: UIScrollViewKeyboardDismissMode,
     decelerates: bool,
     scrolls_to_top: bool, // (с прошлого фикса)
+    drag_start_location: Option<CGPoint>,
+    drag_start_offset: CGPoint,
     can_cancel_content_touches: bool,
     delays_content_touches: bool,
     /// `UIScrollViewIndicatorStyle` — specifies the look of the scroll
@@ -113,6 +115,8 @@ impl Default for UIScrollViewHostObject {
             keyboard_dismiss_mode: UIScrollViewKeyboardDismissModeNone,
             decelerates: true,
             scrolls_to_top: true,
+            drag_start_location: None,
+            drag_start_offset: CGPoint { x: 0.0, y: 0.0 },
             can_cancel_content_touches: true,
             delays_content_touches: true,
             indicator_style: 0,
@@ -381,6 +385,17 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 // MARK: - Touch handling
 
+- (())touchesBegan:(id)touches withEvent:(id)_event {
+    let touch: id = msg![env; touches anyObject];
+    let location: CGPoint = msg![env; touch locationInView:this];
+    let offset: CGPoint = msg![env; this contentOffset];
+    let host = env.objc.borrow_mut::<UIScrollViewHostObject>(this);
+    host.drag_start_location = Some(location);
+    host.drag_start_offset = offset;
+    host.snap_target = None;
+    host.snap_steps_remaining = 0;
+}
+
 - (())touchesMoved:(id)touches withEvent:(id)_event {
     let scroll_enabled: bool = msg![env; this scrollEnabled];
     if !scroll_enabled {
@@ -433,7 +448,7 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 }
 
-- (())touchesEnded:(id)_touches withEvent:(id)_event {
+- (())touchesEnded:(id)touches withEvent:(id)_event {
     let paging_enabled = env.objc.borrow::<UIScrollViewHostObject>(this).paging_enabled;
     if paging_enabled {
         let bounds: CGRect = msg![env; this bounds];
@@ -441,17 +456,33 @@ pub const CLASSES: ClassExports = objc_classes! {
         let offset: CGPoint = msg![env; this contentOffset];
         let page_width = bounds.size.width.max(1.0);
         let max_offset = (content_size.width - page_width).max(0.0);
-        let target_x = (offset.x / page_width).round() * page_width;
-        let target = CGPoint {
-            x: target_x.clamp(0.0, max_offset),
-            y: 0.0,
+        let touch: id = msg![env; touches anyObject];
+        let end_location: CGPoint = msg![env; touch locationInView:this];
+        let (start_location, start_offset) = {
+            let host = env.objc.borrow_mut::<UIScrollViewHostObject>(this);
+            (host.drag_start_location, host.drag_start_offset)
         };
+        let start_offset = start_location
+            .map(|_| start_offset)
+            .unwrap_or(offset);
+        let delta_x = start_location.map_or(0.0, |start| end_location.x - start.x);
+        let start_page = (start_offset.x / page_width).round();
+        let page_delta = if delta_x < -page_width * 0.16 {
+            1.0
+        } else if delta_x > page_width * 0.16 {
+            -1.0
+        } else {
+            ((offset.x / page_width).round() - start_page).clamp(-1.0, 1.0)
+        };
+        let target_x = ((start_page + page_delta) * page_width).clamp(0.0, max_offset);
+        let target = CGPoint { x: target_x, y: 0.0 };
+        {
+            let host = env.objc.borrow_mut::<UIScrollViewHostObject>(this);
+            host.drag_start_location = None;
+            host.snap_target = Some(target);
+            host.snap_steps_remaining = 8;
+        }
         if (target.x - offset.x).abs() > 0.5 {
-            {
-                let host = env.objc.borrow_mut::<UIScrollViewHostObject>(this);
-                host.snap_target = Some(target);
-                host.snap_steps_remaining = 8;
-            }
             let selector = env.objc.register_host_selector(
                 "_touchHLE_scrollViewSnap:".to_string(),
                 &mut env.mem,
@@ -464,6 +495,11 @@ pub const CLASSES: ClassExports = objc_classes! {
                                               repeats:true
             ];
             return;
+        }
+        {
+            let host = env.objc.borrow_mut::<UIScrollViewHostObject>(this);
+            host.snap_target = None;
+            host.snap_steps_remaining = 0;
         }
     }
 

@@ -24,6 +24,7 @@ use crate::frameworks::carbon_core::eofErr;
 use crate::frameworks::core_audio_types::AudioStreamBasicDescription;
 use crate::frameworks::core_foundation::cf_run_loop::kCFRunLoopCommonModes;
 use crate::frameworks::foundation::ns_error::NSOSStatusErrorDomain;
+use crate::media_capture;
 use crate::frameworks::foundation::{ns_string, NSInteger, NSTimeInterval, NSUInteger};
 use crate::mem::{guest_size_of, ConstVoidPtr, GuestUSize, MutPtr, MutVoidPtr, Ptr};
 use crate::objc::{
@@ -543,11 +544,15 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (bool)record {
+    let available = media_capture::microphone_available();
     log!(
-        "[(AVAudioRecorder *){:?} record] — stub, recording not \
-         supported",
-        this
+        "[(AVAudioRecorder *){:?} record] native microphone available={}",
+        this,
+        available
     );
+    if !available {
+        return false;
+    }
     env.objc
         .borrow_mut::<AVAudioRecorderHostObject>(this)
         .is_recording = true;
@@ -559,11 +564,13 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 - (bool)prepareToRecord {
+    let available = media_capture::microphone_available();
     log_dbg!(
-        "[(AVAudioRecorder *){:?} prepareToRecord] — stub",
-        this
+        "[(AVAudioRecorder *){:?} prepareToRecord] native microphone available={}",
+        this,
+        available
     );
-    true
+    available
 }
 
 - (())pause {

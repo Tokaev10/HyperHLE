@@ -8,6 +8,7 @@
 use crate::dyld::{ConstantExports, HostConstant};
 use crate::frameworks::foundation::{ns_string, NSInteger, NSUInteger};
 use crate::mem::MutPtr;
+use crate::media_capture;
 use crate::objc::{
     autorelease, id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject,
 };
@@ -443,6 +444,18 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 // MARK: - Audio properties
+
+- (bool)inputAvailable {
+    media_capture::microphone_available()
+}
+
+- (NSInteger)inputNumberOfChannels {
+    if media_capture::microphone_available() { 1 } else { 0 }
+}
+
+- (NSInteger)outputNumberOfChannels {
+    2
+}
 
 - (f64)sampleRate {
     env.objc.borrow::<AVAudioSessionHostObject>(this).preferred_sample_rate

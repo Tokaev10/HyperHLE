@@ -47,6 +47,7 @@ mod licenses;
 mod mach_o;
 mod mach_o64;
 mod matrix;
+mod media_capture;
 mod mem;
 mod mem64;
 mod objc;

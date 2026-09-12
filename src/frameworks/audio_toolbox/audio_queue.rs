@@ -25,6 +25,7 @@ use crate::frameworks::core_foundation::cf_run_loop::{
 };
 use crate::frameworks::foundation::ns_run_loop;
 use crate::frameworks::foundation::ns_string::get_static_str;
+use crate::media_capture;
 use crate::mem::{
     guest_size_of, ConstPtr, ConstVoidPtr, GuestUSize, Mem, MutPtr, MutVoidPtr, Ptr, SafeRead,
 };
@@ -1954,6 +1955,15 @@ fn unqueue_buffers<F: FnMut(ALuint)>(al_source: ALuint, context: &OpenAL<'_>, mu
 }
 
 pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
+    let is_input = State::get(&mut env.framework_state)
+        .audio_queues
+        .get(&in_aq)
+        .is_some_and(|queue| queue.is_input);
+    if is_input {
+        handle_input_audio_queue(env, in_aq);
+        return;
+    }
+
     let needs_source = State::get(&mut env.framework_state)
         .audio_queues
         .get(&in_aq)
@@ -2110,6 +2120,106 @@ pub fn handle_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
 
     if let Some(host_object) = state.audio_queues.get_mut(&in_aq) {
         host_object.is_running_handler = false;
+    }
+}
+
+fn handle_input_audio_queue(env: &mut Environment, in_aq: AudioQueueRef) {
+    let Some((format, callback_proc, callback_user_data, running, buffers)) = State::get(&mut env.framework_state)
+        .audio_queues
+        .get(&in_aq)
+        .map(|queue| {
+            (
+                queue.format,
+                queue.callback_proc,
+                queue.callback_user_data,
+                queue.is_running == AudioQueueIsRunning::Running,
+                queue.buffer_queue.iter().copied().collect::<Vec<_>>(),
+            )
+        })
+    else {
+        return;
+    };
+    if !running || buffers.is_empty() {
+        return;
+    }
+
+    let channels = format.channels_per_frame.max(1) as usize;
+    let bits = format.bits_per_channel;
+    let bytes_per_frame = format.bytes_per_frame.max(1) as usize;
+    for buffer_ref in buffers {
+        let Some(position) = State::get(&mut env.framework_state)
+            .audio_queues
+            .get(&in_aq)
+            .and_then(|queue| queue.buffer_queue.iter().position(|candidate| *candidate == buffer_ref))
+        else {
+            continue;
+        };
+        let Some(queue) = State::get(&mut env.framework_state)
+            .audio_queues
+            .get_mut(&in_aq)
+        else {
+            continue;
+        };
+        queue.buffer_queue.remove(position);
+        let buffer = env.mem.read(buffer_ref);
+        let capacity = buffer.audio_data_bytes_capacity as usize;
+        if capacity == 0 {
+            continue;
+        }
+        let native = media_capture::take_microphone_pcm(capacity.max(4096));
+        let mut output = vec![0u8; capacity];
+        if bits == 16 && bytes_per_frame >= channels * 2 {
+            let native_samples = native.chunks_exact(2).map(|sample| i16::from_le_bytes([sample[0], sample[1]]));
+            let mut offset = 0usize;
+            for sample in native_samples {
+                for _ in 0..channels {
+                    if offset + 2 > output.len() {
+                        break;
+                    }
+                    output[offset..offset + 2].copy_from_slice(&sample.to_le_bytes());
+                    offset += bytes_per_frame / channels;
+                }
+                if offset >= output.len() {
+                    break;
+                }
+            }
+            if native.is_empty() {
+                output.fill(0);
+            }
+        } else if bits == 8 && bytes_per_frame >= channels {
+            let mut offset = 0usize;
+            for sample in native.chunks_exact(2) {
+                let value = (i16::from_le_bytes([sample[0], sample[1]]) as i32 / 256 + 128)
+                    .clamp(0, 255) as u8;
+                for _ in 0..channels {
+                    if offset >= output.len() {
+                        break;
+                    }
+                    output[offset] = value;
+                    offset += bytes_per_frame / channels;
+                }
+                if offset >= output.len() {
+                    break;
+                }
+            }
+        }
+        env.mem
+            .bytes_at_mut(buffer.audio_data.cast(), capacity as GuestUSize)
+            .copy_from_slice(&output);
+        env.mem
+            .write(buffer_ref, AudioQueueBuffer { audio_data_bytes_capacity: buffer.audio_data_bytes_capacity, audio_data: buffer.audio_data, audio_data_byte_size: capacity as u32, user_data: buffer.user_data, packet_description_capacity: buffer.packet_description_capacity, _packet_descriptions: buffer._packet_descriptions, _packet_description_count: buffer._packet_description_count });
+        if callback_proc.addr_with_thumb_bit() != 0 {
+            let _: () = callback_proc.call_from_host(env, (callback_user_data, in_aq, buffer_ref));
+        }
+        if let Some(queue) = State::get(&mut env.framework_state)
+            .audio_queues
+            .get_mut(&in_aq)
+        {
+            queue.callbacks = queue.callbacks.saturating_add(1);
+            queue.supplied_frames = queue
+                .supplied_frames
+                .saturating_add(frames_for_audio_bytes(&queue.format, capacity));
+        }
     }
 }
 
@@ -2796,7 +2906,7 @@ pub fn AudioQueueNewInput(
     in_flags: u32,
     out_aq: MutPtr<AudioQueueRef>,
 ) -> OSStatus {
-    log!("AudioQueueNewInput: using deterministic silent microphone input");
+    log!("AudioQueueNewInput: using native Android microphone input when permission is available; silence is used only as a denied/unavailable fallback");
 
     if in_flags != 0 {
         log!(

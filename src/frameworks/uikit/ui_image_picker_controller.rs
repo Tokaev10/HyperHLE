@@ -10,6 +10,7 @@
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::foundation::ns_string::to_rust_string;
 use crate::frameworks::foundation::NSInteger;
+use crate::media_capture;
 use crate::objc::{
     id, msg, msg_class, nil, objc_classes, release, retain, ClassExports, HostObject, NSZonePtr,
 };
@@ -80,7 +81,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 // MARK: - Source type
 
 + (bool)isSourceTypeAvailable:(UIImagePickerControllerSourceType)_source_type {
-    false
+    _source_type != UIImagePickerControllerSourceTypeCamera || media_capture::camera_available()
 }
 
 + (id)availableMediaTypesForSourceType:(UIImagePickerControllerSourceType)_source_type {
@@ -89,7 +90,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 }
 
 + (bool)isCameraDeviceAvailable:(UIImagePickerControllerCameraDevice)_device {
-    false
+    media_capture::camera_available()
 }
 
 + (bool)isFlashAvailableForCameraDevice:(UIImagePickerControllerCameraDevice)_device {
@@ -229,8 +230,9 @@ pub const CLASSES: ClassExports = objc_classes! {
 // MARK: - Camera actions (stubs)
 
 - (bool)startVideoCapture {
-    log!("UIImagePickerController startVideoCapture: stubbed, returning false");
-    false
+    let available = media_capture::camera_available();
+    log!("UIImagePickerController startVideoCapture: native camera available={}", available);
+    available
 }
 
 - (())stopVideoCapture {
