@@ -209,34 +209,56 @@ fn touchhle_cocos_is_gl_or_game_view_name(class_name: &str) -> bool {
         || class_name.contains("RootView")
 }
 
-fn touchhle_should_use_landscape_touch_remap(env: &Environment) -> bool {
-    match env.bundle.bundle_identifier() {
-        // Confirmed landscape Source/Cocos games.
-        //
-        // NOTE: com.robtop.geometryjump (Geometry Dash) is deliberately NOT in
-        // this list. GD mounts its cocos2d-x EAGLView as a UIViewController's
-        // view, so UIWindow's landscape autorotation transform makes
-        // -locationInView: already return coordinates in the game's landscape
-        // (480x320) space, aligned with what is on screen. Applying the
-        // portrait->landscape cocos remap on top of that rotated the
-        // already-correct point a second time (a squash-rotated 90° map), so
-        // taps landed on the wrong UI elements: pressing high opened the
-        // settings, pressing low opened the level menu.
-        "at.source.veggie1"
-        | "at.source.potato3D"
-        | "at.source.potpan" => true,
+fn touchhle_manual_landscape_touch_remap_enabled() -> bool {
+    crate::env_flag_cached!("TOUCHHLE_TOUCH_LOCATION_PORTRAIT_TO_LANDSCAPE")
+        || crate::env_flag_cached!("TOUCHHLE_COCOS_TOUCH_REMAP")
+        || crate::env_flag_cached!("TOUCHHLE_UNITY_TOUCH_REMAP")
+        || crate::env_flag_cached!("TOUCHHLE_ENGINE_TOUCH_REMAP")
+}
 
-        // TomatoZombie is native portrait.
+fn touchhle_should_use_landscape_touch_remap_for_bundle(
+    bundle_id: &str,
+    manual_override: bool,
+) -> bool {
+    match bundle_id {
+        "at.source.veggie1" | "at.source.potato3D" | "at.source.potpan" => true,
         "at.source.tomzom" => false,
+        // UIKit already returns the landscape coordinates used by the game's
+        // 480x320 view (HyperHLE 44a1a109).
+        "com.saban.powerrangersbash" => manual_override,
+        _ => manual_override,
+    }
+}
 
-        // Manual override for testing.
-        // PERF: read-once cached flags; this is checked per touch event.
-        _ => {
-            crate::env_flag_cached!("TOUCHHLE_TOUCH_LOCATION_PORTRAIT_TO_LANDSCAPE")
-                || crate::env_flag_cached!("TOUCHHLE_COCOS_TOUCH_REMAP")
-                || crate::env_flag_cached!("TOUCHHLE_UNITY_TOUCH_REMAP")
-                || crate::env_flag_cached!("TOUCHHLE_ENGINE_TOUCH_REMAP")
-        }
+fn touchhle_should_use_landscape_touch_remap(env: &Environment) -> bool {
+    touchhle_should_use_landscape_touch_remap_for_bundle(
+        env.bundle.bundle_identifier(),
+        touchhle_manual_landscape_touch_remap_enabled(),
+    )
+}
+
+#[cfg(test)]
+mod landscape_touch_remap_tests {
+    use super::touchhle_should_use_landscape_touch_remap_for_bundle;
+
+    #[test]
+    fn power_rangers_keeps_its_native_landscape_touch_coordinates() {
+        assert!(!touchhle_should_use_landscape_touch_remap_for_bundle(
+            "com.saban.powerrangersbash",
+            false
+        ));
+        assert!(touchhle_should_use_landscape_touch_remap_for_bundle(
+            "com.saban.powerrangersbash",
+            true
+        ));
+        assert!(touchhle_should_use_landscape_touch_remap_for_bundle(
+            "at.source.veggie1",
+            false
+        ));
+        assert!(!touchhle_should_use_landscape_touch_remap_for_bundle(
+            "at.source.tomzom",
+            true
+        ));
     }
 }
 

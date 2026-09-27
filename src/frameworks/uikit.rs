@@ -973,6 +973,10 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
 
 #[derive(Default)]
 pub struct State {
+    /// Set when `-[UIWindow addSubview:]` really applied the auto-rotation
+    /// transform (see `ui_window.rs`). EAGL direct presenters gate their
+    /// 180-degree compensation on this (HyperHLE 0a590067).
+    pub autorotation_transform_applied: bool,
     ui_accelerometer: ui_accelerometer::State,
     ui_application: ui_application::State,
     ui_color: ui_color::State,

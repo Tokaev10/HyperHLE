@@ -2030,29 +2030,32 @@ unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_tok
 
     // Save these for when we need to draw the frame
     let viewport = env.window.as_mut().unwrap().viewport();
-    let device_family = env.window.as_mut().unwrap().device_family();
     let device_orientation = env.window.as_mut().unwrap().current_rotation();
+    let device_family = env.window.as_mut().unwrap().device_family();
     // Guest-authored EAGL content: present with the HyperHLE-proven pipeline —
     // the device-orientation quarter-turn (plus the user render rotation and
-    // axis reverts via presentation_matrix), and an extra 180-degree turn for
-    // iPad apps in a non-portrait orientation. On iPad, UIKit's autorotation
-    // path (UIWindow addSubview:) rotates the root view so the app's
+    // axis reverts via presentation_matrix), and an extra 180-degree turn only
+    // when the app actually opted into UIKit auto-rotation. When it did,
+    // `-[UIWindow addSubview:]` rotated the root view so the app's
     // portrait-drawn content ends up rotated for landscape display; since the
     // fullscreen EAGL fast path bypasses Core Animation composition, that
-    // extra half-turn has to be replicated here (same as HyperHLE/upstream
-    // touchHLE). iPhone landscape games are NOT given the extra turn, because
-    // they typically rotate their drawing themselves.
+    // extra half-turn has to be replicated here. Apps that rotate their own
+    // drawing (they answer NO to shouldAutorotateToInterfaceOrientation:) never
+    // get the view transform and must NOT receive the extra turn — the old
+    // device-family heuristic gave them an unwanted extra 180 degrees
+    // (upside-down + mirrored controls, e.g. Gangstar Rio on iPad).
     let mut rotation_matrix = if std::env::var_os("TOUCHHLE_DISABLE_PRESENT_ROTATION").is_some() {
         log_once!(
             "TOUCHHLE_DISABLE_PRESENT_ROTATION=1: presenting EAGL renderbuffer without texture rotation"
         );
         crate::matrix::Matrix::<2>::identity()
     } else {
-        let needs_autorotation_compensation = device_family.is_ipad()
-            && !matches!(
-                device_orientation,
-                crate::window::DeviceOrientation::Portrait
-            );
+        let needs_autorotation_compensation =
+            env.framework_state.uikit.autorotation_transform_applied
+                && !matches!(
+                    device_orientation,
+                    crate::window::DeviceOrientation::Portrait
+                );
         let base = env.window.as_mut().unwrap().presentation_matrix();
         if needs_autorotation_compensation {
             base.multiply(&crate::matrix::Matrix::z_rotation(std::f32::consts::PI))

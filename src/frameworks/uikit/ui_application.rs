@@ -26,6 +26,10 @@ pub struct State {
     /// Whether shake to edit is enabled
     pub(super) application_supports_shake_to_edit: bool,
     pub(super) ignoring_interaction_events_count: u32,
+    // NOTE: the `autorotation_transform_applied` flag lives on the top-level
+    // `uikit::State` (src/frameworks/uikit.rs), not here — both the writer
+    // (`-[UIWindow addSubview:]`) and the reader (`present_renderbuffer`)
+    // access it through `env.framework_state.uikit`.
 }
 
 #[derive(Default)]

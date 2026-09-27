@@ -505,6 +505,41 @@ impl Bundle {
         vec!["UIInterfaceOrientationPortrait"]
     }
 
+    /// `supported_interface_orientations` honouring `~ipad` plist key
+    /// overrides. Universal apps carry `UISupportedInterfaceOrientations~ipad`
+    /// (and/or `UIInterfaceOrientation~ipad`) whose landscape order regularly
+    /// differs from the iPhone list; using the iPhone list when emulating an
+    /// iPad rotates the screen 180 degrees (HyperHLE af60a979).
+    pub fn supported_interface_orientations_for_family(&self, ipad: bool) -> Vec<&str> {
+        if ipad {
+            for key in [
+                "UISupportedInterfaceOrientations~ipad",
+                "UIInterfaceOrientation~ipad",
+            ] {
+                if let Some(v) = self.plist.get(key) {
+                    if let Some(arr) = v.as_array() {
+                        let orientations: Vec<&str> =
+                            arr.iter().filter_map(|o| o.as_string()).collect();
+                        if !orientations.is_empty() {
+                            return orientations;
+                        }
+                    }
+                    if let Some(s) = v.as_string() {
+                        let orientations: Vec<&str> = s
+                            .split(',')
+                            .map(|p| p.trim())
+                            .filter(|p| !p.is_empty())
+                            .collect();
+                        if !orientations.is_empty() {
+                            return orientations;
+                        }
+                    }
+                }
+            }
+        }
+        self.supported_interface_orientations()
+    }
+
     pub fn device_family_array(&self) -> Vec<DeviceFamily> {
         // Apple docs: UIDeviceFamily is an Array of Numbers (1=iPhone, 2=iPad).
         // https://developer.apple.com/documentation/bundleresources/information-property-list/uidevicefamily
