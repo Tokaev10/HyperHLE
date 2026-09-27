@@ -183,9 +183,9 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
     let software_presentation = env.window().is_software_presentation();
     let present_frame_args = (
         env.window().viewport(),
-        // Guest-authored layer content: mirrored landscape rotation (see
-        // Window::guest_content_presentation_matrix).
-        env.window().guest_content_presentation_matrix(),
+        // Same pipeline as HyperHLE: a single device-orientation quarter-turn
+        // (plus user render rotation/axis reverts) for everything composited.
+        env.window().presentation_matrix(),
         env.window().virtual_cursor_visible_at(),
     );
 

@@ -17,6 +17,7 @@ use crate::gles::wgpu::WgpuPresentation;
 use crate::gles::{
     create_gles1_ctx_no_parent_stack, create_gles1_gles3_translator_ctx_no_parent_stack,
     create_gles1_translator_ctx_no_parent_stack, create_gles2_ctx_no_parent_stack,
+    create_gles3_ctx_no_parent_stack,
     create_host_gles1_ctx_no_parent_stack, GLESContext, GLES,
 };
 use crate::image::Image;
@@ -1732,8 +1733,11 @@ impl Window {
                 crate::options::GraphicsApi::TranslatorGLES30 => {
                     create_gles1_gles3_translator_ctx_no_parent_stack(&mut window)
                 }
-                crate::options::GraphicsApi::GLES20 | crate::options::GraphicsApi::GLES30 => {
+                crate::options::GraphicsApi::GLES20 => {
                     create_gles2_ctx_no_parent_stack(&mut window)
+                }
+                crate::options::GraphicsApi::GLES30 => {
+                    create_gles3_ctx_no_parent_stack(&mut window)
                 }
                 crate::options::GraphicsApi::GLES10 | crate::options::GraphicsApi::GLES11 => {
                     create_gles1_ctx_no_parent_stack(&mut window, options)
@@ -1857,12 +1861,10 @@ impl Window {
                 [x, y]
             } else {
                 // Must be the inverse of the matrix used to DISPLAY guest
-                // content (see guest_content_presentation_matrix), so taps
-                // stay aligned with what is on screen for guest-authored UI.
-                let matrix = window
-                    .guest_content_presentation_matrix()
-                    .inverse()
-                    .unwrap();
+                // content (see presentation_matrix), so taps stay aligned with
+                // what is on screen. Matches HyperHLE, whose hit-test uses the
+                // plain inverse of the device rotation matrix.
+                let matrix = window.presentation_matrix().inverse().unwrap();
                 matrix.transform([x, y])
             };
 
@@ -3010,40 +3012,60 @@ impl Window {
         height: u32,
         bottom_up: bool,
     ) {
+        // Frame generation intentionally runs on the default SDL surface
+        // backend (CPU interpolation), not WGPU: the pixels arriving here are
+        // already oriented for display (prepare_native_frame applied the
+        // quarter-turns and axis reverts), so they must be blitted without
+        // any further rotation. present_pixels_prepared handles that.
         if self.frame_generation && !self.gpu_frame_generation_failed {
-            if let Some(mut wgpu) = self.wgpu_presentation.take() {
-                match wgpu.present_interpolated(
-                    &pixels,
-                    width,
-                    height,
-                    bottom_up,
-                    self.display_refresh_rate,
-                ) {
-                    Ok(()) => {
-                        self.wgpu_presentation = Some(wgpu);
-                        return;
-                    }
-                    Err(error) => {
-                        log!("WGPU frame generation failed; presenting the source frame: {error}");
-                        self.gpu_frame_generation_failed = true;
-                        self.frame_generation_state.previous = None;
-                        self.frame_generation_state.last_frame_at = None;
-                        match wgpu.present_pixels(&pixels, width, height, bottom_up) {
-                            Ok(()) => {
-                                self.wgpu_presentation = Some(wgpu);
-                                return;
-                            }
-                            Err(fallback_error) => {
-                                log!("WGPU fallback presentation failed; dropping the WGPU path and returning to SDL: {fallback_error}");
-                            }
-                        }
-                    }
-                }
-            } else {
-                log_once!("GPU frame generation unavailable; presenting source frames only");
-                self.gpu_frame_generation_failed = true;
+            let expected_len = width as usize * height as usize * 4;
+            if width == 0 || height == 0 || pixels.len() < expected_len {
                 self.frame_generation_state.previous = None;
                 self.frame_generation_state.last_frame_at = None;
+            } else {
+                let now = std::time::Instant::now();
+                let previous = if self.frame_generation_state.width == width
+                    && self.frame_generation_state.height == height
+                {
+                    self.frame_generation_state.previous.take()
+                } else {
+                    self.frame_generation_state.previous = None;
+                    None
+                };
+                let elapsed = self
+                    .frame_generation_state
+                    .last_frame_at
+                    .map_or(std::time::Duration::from_secs_f64(1.0 / 60.0), |last| {
+                        now.saturating_duration_since(last)
+                    });
+                self.frame_generation_state.width = width;
+                self.frame_generation_state.height = height;
+                self.frame_generation_state.last_frame_at = Some(now);
+                let display_interval =
+                    std::time::Duration::from_secs_f64(1.0 / self.display_refresh_rate.max(1.0));
+                let display_slots = if elapsed <= std::time::Duration::from_millis(250) {
+                    (elapsed.as_secs_f64() / display_interval.as_secs_f64())
+                        .round()
+                        .clamp(1.0, 8.0) as usize
+                } else {
+                    1
+                };
+                if let Some(previous) = previous {
+                    for step in 1..display_slots {
+                        let blend = step as u32 * 256 / display_slots as u32;
+                        let inverse = 256 - blend;
+                        let mut interpolated = vec![0u8; expected_len];
+                        for index in 0..expected_len {
+                            interpolated[index] = ((previous[index] as u32 * inverse
+                                + pixels[index] as u32 * blend)
+                                >> 8) as u8;
+                        }
+                        self.present_pixels_prepared(interpolated, width, height);
+                    }
+                }
+                self.present_pixels_prepared(pixels.clone(), width, height);
+                self.frame_generation_state.previous = Some(pixels);
+                return;
             }
         }
         if let Some(mut wgpu) = self.wgpu_presentation.take() {
@@ -3061,6 +3083,58 @@ impl Window {
         self.frame_generation_state.last_frame_at = None;
         self.wgpu_presentation = None;
         self.window.gl_swap_window();
+    }
+
+    /// Blit display-oriented pixels (already rotated by
+    /// [Self::prepare_native_frame]) to the window surface via SDL without
+    /// applying the presentation transform again. This is the default-backend
+    /// presentation path for frame generation on the GPU readback routes.
+    fn present_pixels_prepared(&mut self, pixels: Vec<u8>, width: u32, height: u32) {
+        if width == 0 || height == 0 || pixels.len() < width as usize * height as usize * 4 {
+            return;
+        }
+        let mut source_pixels = pixels;
+        let source = match Surface::from_data(
+            &mut source_pixels,
+            width,
+            height,
+            width * 4,
+            PixelFormatEnum::RGBA32,
+        ) {
+            Ok(surface) => surface,
+            Err(error) => {
+                log!("Could not create software presentation surface: {error}");
+                return;
+            }
+        };
+        let (x, y, target_width, target_height) = self.viewport();
+        let mut target = match self.window.surface(&self.event_pump) {
+            Ok(surface) => surface,
+            Err(error) => {
+                log!("Could not access software presentation target: {error}");
+                return;
+            }
+        };
+        if let Err(error) = target.fill_rect(None, Color::BLACK) {
+            log!("Could not clear software presentation target: {error}");
+            return;
+        }
+        if let Err(error) = source.blit_scaled(
+            None,
+            &mut *target,
+            Some(sdl2::rect::Rect::new(
+                x as i32,
+                y as i32,
+                target_width,
+                target_height,
+            )),
+        ) {
+            log!("Could not scale software presentation frame: {error}");
+            return;
+        }
+        if let Err(error) = target.update_window() {
+            log!("Could not update software presentation target: {error}");
+        }
     }
 
     fn present_software_pixels(
@@ -3501,50 +3575,12 @@ impl Window {
     /// Presentation transform for GUEST-AUTHORED content (UIKit layer trees,
     /// EAGL renderbuffers).
     ///
-    /// Guest apps lay out their landscape UI with their own interface-orientation
-    /// compensation baked into the content they hand us, so the quarter turn we
-    /// apply for the physical device pose must be mirrored for landscape
-    /// orientations -- applying the device-pose rotation as-is renders such
-    /// content 180 degrees off. This is the same discovery the legacy
-    /// launch-image path in `display_splash` documents ("applying the normal
-    /// framebuffer rotation to such an image turns it upside down"),
-    /// generalised to all guest content instead of a splash-only workaround.
-    ///
-    /// Host-authored content (launch image, MetalHLE's own movie player views)
-    /// carries no such guest compensation and must keep using
-    /// [Self::presentation_matrix]. Touch hit-testing uses the inverse of this
-    /// matrix so taps stay aligned with what is on screen.
-    ///
-    /// `TOUCHHLE_PRESENT_DEVICE_ROTATION=1` restores the pre-mirror behaviour
-    /// for both display and touch, as an escape hatch.
+    /// DEPRECATED: this used to mirror the landscape quarter-turn (drop the
+    /// device turn for guest content) to fix one game's menu; that mis-rotated
+    /// every landscape game by 90 degrees, so it now simply forwards to
+    /// [Self::presentation_matrix] — the HyperHLE-proven single pipeline.
     pub fn guest_content_presentation_matrix(&self) -> Matrix<2> {
-        // The guest authors its frames already rotated for the device
-        // orientation it was told about (via the interface-orientation APIs),
-        // so guest content must NOT get an extra device quarter-turn here —
-        // that double-rotated landscape games (everything 180° wrong when the
-        // device rotated). Presentation is identical to window content: only
-        // the user-configured render rotation and axis reverts apply.
-        // TOUCHHLE_PRESENT_DEVICE_ROTATION=1 restores the old behaviour for
-        // experimentation.
-        if std::env::var_os("TOUCHHLE_PRESENT_DEVICE_ROTATION").is_some() {
-            return self.presentation_matrix();
-        }
-        self.presentation_rotation_and_revert_matrix()
-    }
-
-    /// Render-rotation + axis-revert only (no device orientation component).
-    fn presentation_rotation_and_revert_matrix(&self) -> Matrix<2> {
-        let render_rotation = match self.render_rotation {
-            RenderRotation::Default => Matrix::identity(),
-            RenderRotation::Minus90 => Matrix::z_rotation(-FRAC_PI_2),
-            RenderRotation::Minus180 | RenderRotation::Plus180 => Matrix::z_rotation(PI),
-            RenderRotation::Plus90 => Matrix::z_rotation(FRAC_PI_2),
-        };
-        let axis_revert = Matrix::scale_2d(
-            if self.revert_x_axis { -1.0 } else { 1.0 },
-            if self.revert_y_axis { -1.0 } else { 1.0 },
-        );
-        render_rotation.multiply(&axis_revert)
+        self.presentation_matrix()
     }
 
     fn presentation_quarter_turns(&self) -> i32 {

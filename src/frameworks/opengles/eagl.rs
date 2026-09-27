@@ -2032,28 +2032,33 @@ unsafe fn present_renderbuffer(env: &mut Environment, drawable: id, context_toke
     let viewport = env.window.as_mut().unwrap().viewport();
     let device_family = env.window.as_mut().unwrap().device_family();
     let device_orientation = env.window.as_mut().unwrap().current_rotation();
-    // The fullscreen EAGL path bypasses UIKit/Core Animation composition,
-    // For iPad apps in a non-portrait orientation, the UIKit auto-rotation
-    // path (`UIWindow addSubview:` in ui_window.rs) applies a rotation
-    // transform to the rootViewController's view so that the app, which
-    // typically draws content "upright" inside the EAGL layer's portrait
-    // Guest-authored EAGL content carries the app's own interface-orientation
-    // compensation, so it needs the mirrored landscape quarter-turn (see
-    // Window::guest_content_presentation_matrix). This replaces both the old
-    // plain device-pose rotation (which rendered iPhone landscape menus 180
-    // degrees off, e.g. BioShock's main menu) and the old iPad-only
-    // "autorotation compensation" (device rotation + 180 degrees, which was
-    // the same mirrored turn in disguise for e.g. Plants vs. Zombies HD).
+    // Guest-authored EAGL content: present with the HyperHLE-proven pipeline —
+    // the device-orientation quarter-turn (plus the user render rotation and
+    // axis reverts via presentation_matrix), and an extra 180-degree turn for
+    // iPad apps in a non-portrait orientation. On iPad, UIKit's autorotation
+    // path (UIWindow addSubview:) rotates the root view so the app's
+    // portrait-drawn content ends up rotated for landscape display; since the
+    // fullscreen EAGL fast path bypasses Core Animation composition, that
+    // extra half-turn has to be replicated here (same as HyperHLE/upstream
+    // touchHLE). iPhone landscape games are NOT given the extra turn, because
+    // they typically rotate their drawing themselves.
     let mut rotation_matrix = if std::env::var_os("TOUCHHLE_DISABLE_PRESENT_ROTATION").is_some() {
         log_once!(
             "TOUCHHLE_DISABLE_PRESENT_ROTATION=1: presenting EAGL renderbuffer without texture rotation"
         );
         crate::matrix::Matrix::<2>::identity()
     } else {
-        env.window
-            .as_mut()
-            .unwrap()
-            .guest_content_presentation_matrix()
+        let needs_autorotation_compensation = device_family.is_ipad()
+            && !matches!(
+                device_orientation,
+                crate::window::DeviceOrientation::Portrait
+            );
+        let base = env.window.as_mut().unwrap().presentation_matrix();
+        if needs_autorotation_compensation {
+            base.multiply(&crate::matrix::Matrix::z_rotation(std::f32::consts::PI))
+        } else {
+            base
+        }
     };
     if std::env::var_os("TOUCHHLE_TRANSLATOR_DISABLE_ROTATION").is_some() {
         log_once_fmt!(
@@ -2174,6 +2179,17 @@ unsafe fn present_renderbuffer(env: &mut Environment, drawable: id, context_toke
             std::mem::drop(gles_boxed);
             env.window.as_mut().unwrap().swap_window();
         }
+        return;
+    }
+
+    // Frame generation needs the raw frame pixels, which only the readback
+    // path produces. The native ES 1.1 fast path renders straight to the
+    // window surface and never touches RAM, so divert it to the readback
+    // presenter exactly like the ES 2.0 path above - otherwise the frame
+    // generation toggle silently does nothing on native-ES1 devices.
+    if frame_generation {
+        std::mem::drop(gles_boxed);
+        present_renderbuffer_readback(env, drawable, None);
         return;
     }
 

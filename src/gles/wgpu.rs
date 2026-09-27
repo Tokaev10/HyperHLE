@@ -780,6 +780,7 @@ impl WgpuPresentation {
                 } else {
                     1
                 };
+                let step_duration = interval / slots as u32;
                 for step in 1..slots {
                     let blend = step as u32 * 256 / slots as u32;
                     let inverse = 256 - blend;
@@ -790,6 +791,12 @@ impl WgpuPresentation {
                             >> 8) as u8;
                     }
                     self.present(&generated, width, height)?;
+                    // Pace the generated frames across the display refresh
+                    // interval. Without this they were all pushed back-to-back
+                    // inside one guest frame, so the compositor only ever
+                    // showed the last one and the toggle appeared to do
+                    // nothing.
+                    std::thread::sleep(step_duration);
                 }
             }
         }

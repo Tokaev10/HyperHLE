@@ -437,30 +437,30 @@ fn extract_custom_driver_archive(path: &std::path::Path) -> Result<std::path::Pa
 
 #[cfg(target_os = "android")]
 fn configure_bundled_angle_driver() -> bool {
-    const LIBRARIES: &[&str] = &[
-        "libEGL_angle.so",
-        "libGLESv1_CM_angle.so",
-        "libGLESv2_angle.so",
-        "libfeature_support_angle.so",
+    // HyperHLE parity: probe the candidate library trios in order and always
+    // override SDL's environment-based choice when a full trio loads. No
+    // panics: an unusable ANGLE just means SDL falls back to the system
+    // OpenGL ES driver.
+    const CANDIDATES: &[(&str, &str, &str)] = &[
+        (
+            "libEGL_angle.so",
+            "libGLESv1_CM_angle.so",
+            "libGLESv2_angle.so",
+        ),
+        (
+            "libEGL_angle_in_apk.so",
+            "libGLESv1_CM_angle_in_apk.so",
+            "libGLESv2_angle_in_apk.so",
+        ),
     ];
-
-    if std::env::var_os("TOUCHHLE_ANGLE").is_some_and(|value| value == "0") {
-        panic!(
-            "ANGLE was requested by the emulator but TOUCHHLE_ANGLE=0 disabled the bundled driver"
-        );
-    }
-    if std::env::var_os("SDL_VIDEO_EGL_DRIVER").is_some()
-        || std::env::var_os("SDL_VIDEO_GL_DRIVER").is_some()
-    {
-        panic!("ANGLE is forced; SDL_VIDEO_EGL_DRIVER/SDL_VIDEO_GL_DRIVER must not override it");
-    }
 
     fn can_load(name: &str) -> bool {
         let Ok(name) = std::ffi::CString::new(name) else {
             return false;
         };
+        // RTLD_NOW = 2. Load, and immediately unload if it succeeded.
         unsafe {
-            let handle = libc::dlopen(name.as_ptr(), libc::RTLD_NOW);
+            let handle = libc::dlopen(name.as_ptr(), 2);
             if handle.is_null() {
                 false
             } else {
@@ -470,20 +470,29 @@ fn configure_bundled_angle_driver() -> bool {
         }
     }
 
-    if !LIBRARIES.iter().all(|name| can_load(name)) {
-        return false;
+    for &(egl, gles1, gles2) in CANDIDATES {
+        let libraries_loadable = can_load(egl) && can_load(gles1) && can_load(gles2);
+        if !libraries_loadable {
+            continue;
+        }
+        unsafe {
+            std::env::set_var("SDL_VIDEO_EGL_DRIVER", egl);
+            // ANGLE's ES 1.1 front-end also resolves higher-version entry
+            // points through EGL's get-proc-address mechanism.
+            std::env::set_var("SDL_VIDEO_GL_DRIVER", gles1);
+        }
+        log!(
+            "Using bundled ANGLE for Android OpenGL ES ({} / {}).",
+            egl,
+            gles1
+        );
+        return true;
     }
-    unsafe {
-        std::env::set_var("SDL_VIDEO_EGL_DRIVER", LIBRARIES[0]);
-        std::env::set_var("SDL_VIDEO_GL_DRIVER", LIBRARIES[1]);
-    }
+
     log!(
-        "Bundled Android ANGLE driver forced: EGL={}, GLES1={}, GLES2={}; Vulkan backend selected",
-        LIBRARIES[0],
-        LIBRARIES[1],
-        LIBRARIES[2]
+        "Bundled ANGLE is unavailable; using the Android system OpenGL ES driver."
     );
-    true
+    false
 }
 
 pub fn configure_angle_driver(enabled: bool) -> bool {
@@ -496,15 +505,19 @@ pub fn configure_angle_driver(enabled: bool) -> bool {
     let explicit_override = explicit_egl.is_some() || explicit_gles.is_some();
 
     if explicit_override {
+        // HyperHLE parity: never abort over driver configuration; log what
+        // was requested and let SDL fall back if the libraries are unusable.
         let Some(egl_path) = explicit_egl else {
-            panic!("ANGLE override requires both TOUCHHLE_ANGLE_EGL and TOUCHHLE_ANGLE_GLES");
+            log!("ANGLE override requires both TOUCHHLE_ANGLE_EGL and TOUCHHLE_ANGLE_GLES; ignoring the override.");
+            return false;
         };
         let Some(gles_path) = explicit_gles else {
-            panic!("ANGLE override requires both TOUCHHLE_ANGLE_EGL and TOUCHHLE_ANGLE_GLES");
+            log!("ANGLE override requires both TOUCHHLE_ANGLE_EGL and TOUCHHLE_ANGLE_GLES; ignoring the override.");
+            return false;
         };
         if !angle_library_paths_are_usable(&egl_path, &gles_path) {
-            panic!(
-                "ANGLE override libraries are not usable: EGL={} GLES={}",
+            log!(
+                "ANGLE override libraries are not usable: EGL={} GLES={}; SDL may fall back or context creation may fail",
                 egl_path.display(),
                 gles_path.display()
             );
@@ -514,7 +527,7 @@ pub fn configure_angle_driver(enabled: bool) -> bool {
             std::env::set_var("SDL_VIDEO_GL_DRIVER", &gles_path);
         }
         log!(
-            "Custom ANGLE Vulkan driver active: EGL={}, GLES={}",
+            "Custom ANGLE driver active: EGL={}, GLES={}",
             egl_path.display(),
             gles_path.display()
         );
@@ -527,7 +540,7 @@ pub fn configure_angle_driver(enabled: bool) -> bool {
                     std::env::remove_var("SDL_VIDEO_GL_DRIVER");
                 }
                 log!(
-                    "Bundled ANGLE libraries are unavailable; forcing Android's package-level ANGLE Vulkan loader"
+                    "Bundled ANGLE is unavailable; using the Android system OpenGL ES driver."
                 );
             }
         }
@@ -543,8 +556,8 @@ pub fn configure_angle_driver(enabled: bool) -> bool {
             let egl_path = std::path::PathBuf::from(egl_name);
             let gles_path = std::path::PathBuf::from(gles_name);
             if !angle_library_paths_are_usable(&egl_path, &gles_path) {
-                panic!(
-                    "ANGLE libraries are not usable: EGL={} GLES={}",
+                log!(
+                    "ANGLE libraries are not present at the configured paths (EGL={} GLES={}); SDL may fall back or context creation may fail",
                     egl_path.display(),
                     gles_path.display()
                 );
@@ -554,16 +567,13 @@ pub fn configure_angle_driver(enabled: bool) -> bool {
                 std::env::set_var("SDL_VIDEO_GL_DRIVER", &gles_path);
             }
             log!(
-                "Native ANGLE Vulkan driver active: EGL={}, GLES={}",
+                "Native ANGLE driver active: EGL={}, GLES={}",
                 egl_path.display(),
                 gles_path.display()
             );
         }
     }
 
-    unsafe {
-        std::env::set_var("ANGLE_DEFAULT_PLATFORM", "vulkan");
-    }
     sdl2::hint::set("SDL_OPENGL_ES_DRIVER", "1");
     true
 }
@@ -792,6 +802,36 @@ pub fn create_gles3_ctx(env: &mut Environment) -> Box<dyn GLESContext> {
 ///
 /// The window owns the internal context used for compositing and the splash
 /// screen, so it must be created before the guest environment exists.
+/// Create an OpenGL ES 3.0 context from the window's main stack.
+///
+/// Selected by `--gles-override-version=3.0` / `3.1` / `3.2` (they all map to
+/// `GraphicsApi::GLES30`) and by guest `kEAGLRenderingAPIOpenGLES3` requests.
+/// Tries the native ES 3.0 driver first (Adreno/Mali/ANGLE on Android,
+/// desktop ES drivers elsewhere), then the desktop-GL 3.3 translation
+/// backend.
+pub fn create_gles3_ctx_no_parent_stack(window: &mut crate::window::Window) -> Box<dyn GLESContext> {
+    assert!(window.on_main_stack());
+    log!("Creating an OpenGL ES 3.0 context:");
+
+    log!("Trying: {}", GLES3NativeContext::description());
+    if let Ok(ctx) = GLES3NativeContext::new(window) {
+        log!("=> Success!");
+        return Box::new(ctx);
+    }
+
+    log!(
+        "Trying: {} (used for OpenGL ES 3.0)",
+        GLES3OnGL3Context::description()
+    );
+    match GLES3OnGL3Context::new(window) {
+        Ok(ctx) => {
+            log!("=> Success!");
+            Box::new(ctx)
+        }
+        Err(err) => panic!("Couldn't create OpenGL ES 3.0 context: {}", err),
+    }
+}
+
 pub fn create_gles2_ctx_no_parent_stack(
     window: &mut crate::window::Window,
 ) -> Box<dyn GLESContext> {
