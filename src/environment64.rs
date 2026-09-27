@@ -1044,25 +1044,51 @@ pub fn run(
             log_dbg!("ARM64 unresolved import: {}", symbol);
         }
     }
-    // Per-game unresolved-import report. Append under a game-name heading
-    // instead of overwriting, so launching another title preserves earlier
-    // games' lists (the file previously held only the newest app's symbols).
+    // Per-game unresolved-import report. Each game gets a single section
+    // keyed by bundle identifier: relaunching a game REPLACES its section
+    // instead of appending a duplicate, and symbols are sorted and
+    // deduplicated so the list is stable, easy to diff, and ready to paste
+    // into a stub generator.
     if !unresolved.is_empty() {
         let game_title = bundle.display_name();
+        let bundle_id = bundle.bundle_identifier();
+        let mut symbols: Vec<&String> = unresolved.iter().collect();
+        symbols.sort();
+        symbols.dedup();
         let mut report = format!(
             "\n===== {} ({}) v{} — {} unresolved imports =====\n",
             game_title,
-            bundle.bundle_identifier(),
+            bundle_id,
             bundle.bundle_version(),
-            unresolved.len()
+            symbols.len()
         );
-        for symbol in &unresolved {
+        for symbol in symbols {
             report.push_str(symbol);
             report.push('\n');
         }
         let report_path = crate::paths::user_data_base_path().join("unresolved_imports.txt");
         let existing = std::fs::read_to_string(&report_path).unwrap_or_default();
-        if let Err(error) = std::fs::write(&report_path, format!("{}{}", existing, report)) {
+        // Drop the previous section for this bundle id (heading line up to
+        // the next heading line), then append the fresh section.
+        let section_heading = format!("({})", bundle_id);
+        let mut kept = String::new();
+        let mut skipping = false;
+        for line in existing.lines() {
+            if skipping {
+                if line.starts_with("=====") {
+                    skipping = false;
+                    // fall through: keep this (next game's) heading line
+                } else {
+                    continue;
+                }
+            } else if line.starts_with("=====") && line.contains(&section_heading) {
+                skipping = true;
+                continue;
+            }
+            kept.push_str(line);
+            kept.push('\n');
+        }
+        if let Err(error) = std::fs::write(&report_path, format!("{}{}", kept, report)) {
             log_dbg!("ARM64 could not write unresolved_imports.txt: {}", error);
         }
     }
