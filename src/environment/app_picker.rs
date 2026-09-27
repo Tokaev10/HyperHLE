@@ -354,6 +354,7 @@ struct AppPickerDelegateHostObject {
     battery_saver: Option<bool>,
     ultra_battery_saver: Option<bool>,
     frame_generation: Option<bool>,
+    skip_intros: Option<bool>,
     high_performance: Option<bool>,
     force_max_clocks: Option<bool>,
     fullscreen: Option<bool>,
@@ -621,6 +622,10 @@ const CLASSES: ClassExports = objc_classes! {
 - (())frameGeneration:(id)switch {
     let switch_state: bool = msg![env; switch isOn];
     env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).frame_generation = Some(switch_state);
+}
+- (())skipIntros:(id)switch {
+    let switch_state: bool = msg![env; switch isOn];
+    env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).skip_intros = Some(switch_state);
 }
 - (())fullscreen:(id)switch { // UISwitch*
     let switch_state: bool = msg![env; switch isOn];
@@ -1158,6 +1163,7 @@ fn app_picker_inner(
     let mut quick_options_frame_pacing = true;
     let mut quick_options_fps_limit: Option<f64> = None;
     let mut quick_options_frame_generation = false;
+    let mut quick_options_skip_intros = false;
     let mut quick_options_high_performance = crate::options::DEFAULT_HIGH_PERFORMANCE;
     let mut quick_options_force_max_clocks = crate::options::DEFAULT_FORCE_MAX_CLOCKS;
     let mut quick_options_vsync = false;
@@ -1404,6 +1410,8 @@ fn app_picker_inner(
         setOn:quick_options_low_audio_quality];
     () = msg![env; (quick_options_stuff.frame_generation_switch)
         setOn:quick_options_frame_generation];
+    () = msg![env; (quick_options_stuff.skip_intros_switch)
+        setOn:quick_options_skip_intros];
     () = msg![env; (quick_options_stuff.vsync_switch) setOn:quick_options_vsync];
     () = msg![env; (quick_options_stuff.battery_saver_switch) setOn:quick_options_battery_saver];
     () = msg![env; (quick_options_stuff.ultra_battery_saver_switch) setOn:quick_options_ultra_battery_saver];
@@ -1978,6 +1986,9 @@ fn app_picker_inner(
         } else if let Some(enabled) = std::mem::take(&mut host_obj.frame_generation) {
             quick_options_frame_generation = enabled;
             () = msg![env; (quick_options_stuff.frame_generation_switch) setOn:enabled];
+        } else if let Some(enabled) = std::mem::take(&mut host_obj.skip_intros) {
+            quick_options_skip_intros = enabled;
+            () = msg![env; (quick_options_stuff.skip_intros_switch) setOn:enabled];
         } else if let Some(enabled) = std::mem::take(&mut host_obj.high_performance) {
             quick_options_high_performance = enabled;
             () = msg![env; (quick_options_stuff.high_performance_switch) setOn:enabled];
@@ -2237,6 +2248,14 @@ fn app_picker_inner(
             "--frame-generation"
         } else {
             "--disable-frame-generation"
+        }
+        .to_string(),
+    );
+    option_args.push(
+        if quick_options_skip_intros {
+            "--skip-intros"
+        } else {
+            "--no-skip-intros"
         }
         .to_string(),
     );
@@ -3218,6 +3237,7 @@ struct QuickOptionsStuff {
     orientation_buttons: [id; 4],
     render_rotation_buttons: [id; 5],
     frame_generation_switch: id,
+    skip_intros_switch: id,
     high_performance_switch: id,
     force_max_clocks_switch: id,
     fps_limit_buttons: [id; 4],
@@ -3479,6 +3499,8 @@ fn setup_quick_options(
         ]),
         RowKind::Label("Frame generation"),
         RowKind::Switch("frameGeneration:", false),
+        RowKind::Label("Skip intro movies (off by default)"),
+        RowKind::Switch("skipIntros:", false),
         RowKind::Subsection("Graphics quality"),
         RowKind::Label("Graphics API"),
         RowKind::GraphicsApiDropdown,
@@ -3642,6 +3664,7 @@ fn setup_quick_options(
     let mut render_rotation_buttons: Option<[id; 5]> = None;
     let mut fps_limit_buttons: Option<[id; 4]> = None;
     let mut frame_generation_switch: id = nil;
+    let mut skip_intros_switch: id = nil;
     let mut high_performance_switch: id = nil;
     let mut force_max_clocks_switch: id = nil;
     let mut log_file_switch: id = nil;
@@ -3984,6 +4007,9 @@ fn setup_quick_options(
                 if selector_name == "frameGeneration:" {
                     frame_generation_switch = switch;
                 }
+                if selector_name == "skipIntros:" {
+                    skip_intros_switch = switch;
+                }
                 if selector_name == "highPerformance:" {
                     high_performance_switch = switch;
                 }
@@ -4280,6 +4306,7 @@ fn setup_quick_options(
         orientation_buttons: orientation_buttons.unwrap_or([nil; 4]),
         render_rotation_buttons: render_rotation_buttons.unwrap_or([nil; 5]),
         frame_generation_switch,
+        skip_intros_switch,
         high_performance_switch,
         force_max_clocks_switch,
         fps_limit_buttons: fps_limit_buttons.unwrap_or([nil; 4]),

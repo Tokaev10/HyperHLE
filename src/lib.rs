@@ -95,6 +95,7 @@ pub extern "C" fn SDL_main(
         } else {
             echo_no_panic!("Panic: {}", payload);
         }
+        crate::gles::forensics_state::report_ring_on_crash(payload);
     }));
     // Empty args: brings up app picker.
     match main([String::new()].into_iter()) {

@@ -2022,7 +2022,7 @@ unsafe fn ensure_present_objects(gles: &mut dyn GLES) -> PresentObjects {
 /// (which should be provided by the app) to a texture and presents it with
 /// [present_frame], trying to avoid noticeably modifying OpenGL ES state while
 /// doing so. The front and back buffers are then swapped.
-unsafe fn present_renderbuffer(env: &mut Environment, drawable: id, context_token: usize) {
+unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_token: usize) {
     // Capture this up front because the env borrow is moved into the GL
     // context machinery below.
     let trace_gl_errors = env.options.trace_gl_errors;
@@ -2165,32 +2165,25 @@ unsafe fn present_renderbuffer(env: &mut Environment, drawable: id, context_toke
     // glEnableClientState / glVertexPointer. Use a small dedicated
     // shader-based presenter instead.
     if gles.is_es2() {
-        if frame_generation {
-            std::mem::drop(gles_boxed);
-            present_renderbuffer_readback(env, drawable, None);
-        } else {
-            present_renderbuffer_es2(
-                gles,
-                viewport,
-                rotation_matrix,
-                virtual_cursor_visible_at,
-                context_token,
-            );
-            std::mem::drop(gles_boxed);
-            env.window.as_mut().unwrap().swap_window();
-        }
+        present_renderbuffer_es2(
+            gles,
+            viewport,
+            rotation_matrix,
+            virtual_cursor_visible_at,
+            context_token,
+        );
+        std::mem::drop(gles_boxed);
+        env.window.as_mut().unwrap().swap_window();
         return;
     }
 
-    // Frame generation needs the raw frame pixels, which only the readback
-    // path produces. The native ES 1.1 fast path renders straight to the
-    // window surface and never touches RAM, so divert it to the readback
-    // presenter exactly like the ES 2.0 path above - otherwise the frame
-    // generation toggle silently does nothing on native-ES1 devices.
+    // Frame generation is intentionally NOT served from this path: forcing a
+    // glReadPixels every frame costs far more than interpolation saves and
+    // makes games lag. The GPU fast path below always runs; interpolation
+    // remains available on software-rendered content where the pixels are
+    // already in host memory.
     if frame_generation {
-        std::mem::drop(gles_boxed);
-        present_renderbuffer_readback(env, drawable, None);
-        return;
+        log_once!("Frame generation: GPU fast path kept (readback-based interpolation would cost more than it saves); interpolation stays available on software-rendered content");
     }
 
     // We can't directly copy the content of the renderbuffer to the default

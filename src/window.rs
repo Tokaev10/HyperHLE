@@ -72,7 +72,18 @@ struct FrameGenerationState {
     width: u32,
     height: u32,
     last_frame_at: Option<Instant>,
+    /// Consecutive frames whose interpolation+present cost overran the
+    /// frame budget. Sustained overruns disable frame generation for the
+    /// rest of the session so it can never make a game lag.
+    cost_overruns: u32,
+    adaptive_disabled: bool,
 }
+
+/// Interpolation (plus the present that carries it) must fit inside this
+/// slice of the frame budget; anything above it is pure added latency.
+const FRAME_GENERATION_BUDGET: Duration = Duration::from_millis(10);
+/// Sustained overruns before frame generation is disabled automatically.
+const FRAME_GENERATION_OVERRUN_LIMIT: u32 = 20;
 
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -1245,6 +1256,26 @@ fn pin_android_thread_to_big_cores(configured: Option<&str>) {
         log!("CPU affinity policy {policy:?} did not resolve to available cores; leaving scheduler unchanged");
         return;
     }
+    // sched_setaffinity() fails with EINVAL when the mask includes CPUs the
+    // process is not allowed to run on (cgroup/cpuset restrictions on many
+    // Android devices). Intersect the requested cores with the process's
+    // allowed set first so pinning succeeds where it can and stays silent
+    // where it cannot.
+    let cpus: Vec<usize> = match allowed_cpu_list() {
+        Some(allowed) if !allowed.is_empty() => {
+            let filtered: Vec<usize> =
+                cpus.iter().copied().filter(|cpu| allowed.contains(cpu)).collect();
+            if filtered.is_empty() {
+                log_dbg!(
+                    "CPU affinity policy {policy:?} names no cores the process may run on (allowed: {:?}); leaving scheduler unchanged",
+                    allowed
+                );
+                return;
+            }
+            filtered
+        }
+        _ => cpus,
+    };
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_ZERO(&mut set);
@@ -1254,12 +1285,30 @@ fn pin_android_thread_to_big_cores(configured: Option<&str>) {
         if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0 {
             log!("Emulator thread pinned to Android CPUs {cpus:?}");
         } else {
-            log!(
-                "Could not apply Android CPU affinity to {cpus:?}: {}",
+            log_dbg!(
+                "Could not apply Android CPU affinity to {cpus:?}: {}; leaving scheduler unchanged",
                 std::io::Error::last_os_error()
             );
         }
     }
+}
+
+/// Parse `Cpus_allowed_list` from /proc/self/status (e.g. "0-3,6-7").
+#[cfg(target_os = "android")]
+fn allowed_cpu_list() -> Option<Vec<usize>> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("Cpus_allowed_list"))?;
+    let list = line.split(':').nth(1)?.trim();
+    let mut cpus = Vec::new();
+    for part in list.split(',') {
+        let mut bounds = part.splitn(2, '-');
+        let start: usize = bounds.next()?.trim().parse().ok()?;
+        let end: usize = bounds.next().map(|b| b.trim().parse().ok()).transpose()?.unwrap_or(start);
+        cpus.extend(start..=end);
+    }
+    Some(cpus)
 }
 
 #[cfg(target_os = "android")]
@@ -2931,7 +2980,7 @@ impl Window {
         height: u32,
         bottom_up: bool,
     ) {
-        if !self.frame_generation {
+        if !self.frame_generation || self.frame_generation_state.adaptive_disabled {
             self.present_software_pixels(pixels, width, height, bottom_up);
             return;
         }
@@ -3004,9 +3053,32 @@ impl Window {
                 generated,
                 self.display_refresh_rate
             );
+            self.note_frame_generation_cost(now.elapsed());
         }
         self.present_software_pixels(current.clone(), width, height, false);
         self.frame_generation_state.previous = Some(current);
+    }
+
+    /// Track how much wall-clock time frame generation consumed this frame.
+    /// When it persistently overruns the budget, disable it for the rest of
+    /// the session and tell the user once: a stuttering "smoother" mode is
+    /// worse than no frame generation at all.
+    fn note_frame_generation_cost(&mut self, cost: Duration) {
+        if cost > FRAME_GENERATION_BUDGET {
+            self.frame_generation_state.cost_overruns += 1;
+        } else {
+            self.frame_generation_state.cost_overruns = 0;
+        }
+        if self.frame_generation_state.cost_overruns >= FRAME_GENERATION_OVERRUN_LIMIT {
+            self.frame_generation_state.adaptive_disabled = true;
+            self.frame_generation_state.previous = None;
+            self.frame_generation_state.last_frame_at = None;
+            log!(
+                "Frame generation disabled automatically: interpolation overhead exceeded the {:.1}ms frame budget on {} consecutive frames; presenting frames directly instead",
+                FRAME_GENERATION_BUDGET.as_secs_f64() * 1000.0,
+                FRAME_GENERATION_OVERRUN_LIMIT
+            );
+        }
     }
 
     fn prepare_native_frame(
@@ -3068,7 +3140,10 @@ impl Window {
         // already oriented for display (prepare_native_frame applied the
         // quarter-turns and axis reverts), so they must be blitted without
         // any further rotation. present_pixels_prepared handles that.
-        if self.frame_generation && !self.gpu_frame_generation_failed {
+        if self.frame_generation
+            && !self.gpu_frame_generation_failed
+            && !self.frame_generation_state.adaptive_disabled
+        {
             let expected_len = width as usize * height as usize * 4;
             if width == 0 || height == 0 || pixels.len() < expected_len {
                 self.frame_generation_state.previous = None;
@@ -3113,6 +3188,7 @@ impl Window {
                         }
                         self.present_pixels_prepared(interpolated, width, height);
                     }
+                    self.note_frame_generation_cost(now.elapsed());
                 }
                 self.present_pixels_prepared(pixels.clone(), width, height);
                 self.frame_generation_state.previous = Some(pixels);

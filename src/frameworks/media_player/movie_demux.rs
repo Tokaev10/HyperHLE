@@ -301,7 +301,7 @@ pub fn demux_video_track(bytes: &[u8]) -> Option<DemuxedVideoTrack> {
         let Some((mdia_start, mdia_end)) = find_box(bytes, s, e, b"mdia") else {
             return Some(true);
         };
-        let is_video = find_box(bytes, mdia_start, mdia_end, b"hdlr").is_some_and(|(hs, he)| {
+        let is_video = find_box(bytes, mdia_start, mdia_end, b"hdlr").is_some_and(|(hs, _he)| {
             // handler_type at offset 8 of the FullBox payload.
             bytes.get(hs + 8..hs + 12) == Some(b"vide")
         });

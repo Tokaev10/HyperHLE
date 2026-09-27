@@ -497,6 +497,13 @@ fn configure_bundled_angle_driver() -> bool {
 
 pub fn configure_angle_driver(enabled: bool) -> bool {
     if !enabled {
+        // HyperHLE parity: a stale or user-provided SDL driver override from
+        // an earlier attempt must not survive a "GLES Native" selection, so
+        // clear both variables and let SDL use the vendor's native driver.
+        unsafe {
+            std::env::remove_var("SDL_VIDEO_EGL_DRIVER");
+            std::env::remove_var("SDL_VIDEO_GL_DRIVER");
+        }
         return false;
     }
 

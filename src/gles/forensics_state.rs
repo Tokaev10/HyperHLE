@@ -124,6 +124,38 @@ pub fn record_host(name: &'static str) {
     record_static(name, None, 0);
 }
 
+/// Crash-time snapshot: dump the recent-call ring without needing a live GL
+/// context (no register/state queries). Called from the panic hook so every
+/// crash report includes what GL was doing right before the abort.
+pub fn report_ring_on_crash(reason: &str) {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(2048);
+    let _ = write!(
+        &mut out,
+        "[GLES FORENSICS] crash snapshot ({reason}); last GL ops on thread {:?} (gen | name | err | args):\n",
+        std::thread::current().id()
+    );
+    RING.with(|r| {
+        let ring = r.borrow();
+        if ring.ops.is_empty() {
+            let _ = write!(&mut out, "[GLES FORENSICS]   (ring empty)\n");
+            return;
+        }
+        let ops: Vec<_> = ring.ops.iter().rev().take(REPORT_MAX_OPS).collect();
+        for op in ops.iter().rev() {
+            let _ = write!(
+                &mut out,
+                "[GLES FORENSICS]   {:>6} | {:<28} | 0x{:04x} | {}\n",
+                op.gen,
+                op.name,
+                op.err,
+                op.args.as_deref().unwrap_or(""),
+            );
+        }
+    });
+    crate::log::echo_preformatted(&out);
+}
+
 /// Truncate and format an args capture.
 pub fn fmt_args(args: std::fmt::Arguments) -> String {
     let mut s = args.to_string();
