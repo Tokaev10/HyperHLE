@@ -9,7 +9,7 @@
 use super::gles11_raw as gles11;
 use super::gles11_raw::types::*;
 use super::gles_generic::GLES;
-use super::util::{try_decode_pvrtc, PalettedTextureFormat};
+use super::util::{try_decode_pvrtc, try_decode_pvrtc_sub, PalettedTextureFormat};
 use super::GLESContext;
 use crate::window::{GLContext, GLVersion, Window};
 use std::ffi::CStr;
@@ -926,15 +926,35 @@ impl GLES for GLES1Native<'_> {
         image_size: GLsizei,
         data: *const GLvoid,
     ) {
-        // PVRTC sub-image updates aren't allowed by the IMG spec — Apple's
-        // ES 1.1 driver returns GL_INVALID_OPERATION too — but we forward
-        // anyway so the guest sees the expected error. Most apps never call
-        // this entry point.
         if data.is_null() && image_size > 0 {
             log!(
                 "Warning: GLES1Native::CompressedTexSubImage2D: NULL data with \
                  non-zero image_size {image_size}; dropping call."
             );
+            return;
+        }
+        // PVRTC sub-image updates aren't allowed by the IMG spec on a driver
+        // that stores the texture compressed (Apple's ES 1.1 driver returns
+        // GL_INVALID_OPERATION). But when this backend software-decoded the
+        // full upload into RGBA storage (`!pvrtc_native`), the level lives as
+        // plain RGBA, so the sub-update must be decoded the same way or the
+        // streamed-in mip never appears (BioShock's loader does this).
+        if crate::gles::should_decode_pvrtc()
+            && !self.pvrtc_native
+            && !data.is_null()
+            && image_size > 0
+            && try_decode_pvrtc_sub(
+                self,
+                target,
+                level,
+                xoffset,
+                yoffset,
+                width,
+                height,
+                format,
+                std::slice::from_raw_parts(data.cast::<u8>(), image_size as usize),
+            )
+        {
             return;
         }
         gles11::CompressedTexSubImage2D(

@@ -12,6 +12,73 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
+/// Return `(is_2bit, is_opaque)` for a PVRTC v1 internal format.
+pub fn pvrtc_format_properties(internalformat: GLenum) -> Option<(bool, bool)> {
+    match internalformat {
+        gles11::COMPRESSED_RGB_PVRTC_2BPPV1_IMG => Some((true, true)),
+        gles11::COMPRESSED_RGBA_PVRTC_2BPPV1_IMG => Some((true, false)),
+        gles11::COMPRESSED_RGB_PVRTC_4BPPV1_IMG => Some((false, true)),
+        gles11::COMPRESSED_RGBA_PVRTC_4BPPV1_IMG => Some((false, false)),
+        _ => None,
+    }
+}
+
+/// Compute the compressed byte size for a PVRTC v1 level without overflowing.
+pub fn pvrtc_payload_size(
+    internalformat: GLenum,
+    width: GLsizei,
+    height: GLsizei,
+) -> Option<usize> {
+    let (is_2bit, _) = pvrtc_format_properties(internalformat)?;
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    width
+        .max(if is_2bit { 16 } else { 8 })
+        .checked_mul(height.max(8))?
+        .checked_mul(if is_2bit { 2 } else { 4 })?
+        .checked_add(7)
+        .map(|bits| bits / 8)
+}
+
+#[cfg(test)]
+mod pvrtc_payload_size_tests {
+    use super::pvrtc_payload_size;
+    use crate::gles::gles11_raw as gles11;
+
+    #[test]
+    fn computes_full_size_for_pvrtc_formats() {
+        assert_eq!(
+            pvrtc_payload_size(gles11::COMPRESSED_RGBA_PVRTC_4BPPV1_IMG, 2048, 2048),
+            Some(2_097_152)
+        );
+        assert_eq!(
+            pvrtc_payload_size(gles11::COMPRESSED_RGBA_PVRTC_2BPPV1_IMG, 2048, 2048),
+            Some(1_048_576)
+        );
+    }
+
+    #[test]
+    fn enforces_pvrtc_minimum_block_dimensions() {
+        assert_eq!(
+            pvrtc_payload_size(gles11::COMPRESSED_RGBA_PVRTC_4BPPV1_IMG, 1, 1),
+            Some(32)
+        );
+        assert_eq!(
+            pvrtc_payload_size(gles11::COMPRESSED_RGBA_PVRTC_2BPPV1_IMG, 1, 1),
+            Some(32)
+        );
+    }
+
+    #[test]
+    fn rejects_non_pvrtc_formats_and_negative_dimensions() {
+        assert_eq!(pvrtc_payload_size(gles11::RGBA, 32, 32), None);
+        assert_eq!(
+            pvrtc_payload_size(gles11::COMPRESSED_RGBA_PVRTC_4BPPV1_IMG, -1, 32),
+            None
+        );
+    }
+}
+
 /// Convert a fixed-point scalar to a floating-point scalar.
 ///
 /// Beware: Rust's type checker won't complain if you mix up [GLfixed] with
@@ -260,10 +327,8 @@ pub fn try_decode_pvrtc(
     border: GLint,
     pvrtc_data: &[u8],
 ) -> bool {
-    let is_2bit = match internalformat {
-        gles11::COMPRESSED_RGB_PVRTC_4BPPV1_IMG | gles11::COMPRESSED_RGBA_PVRTC_4BPPV1_IMG => false,
-        gles11::COMPRESSED_RGB_PVRTC_2BPPV1_IMG | gles11::COMPRESSED_RGBA_PVRTC_2BPPV1_IMG => true,
-        _ => return false,
+    let Some((is_2bit, is_opaque)) = pvrtc_format_properties(internalformat) else {
+        return false;
     };
 
     if border != 0 {
@@ -296,10 +361,12 @@ pub fn try_decode_pvrtc(
     // PVRTC decoder. (`decode_pvrtc` itself still asserts internally as
     // a defence-in-depth measure, but we shouldn't rely on that — see the
     // function-level doc comment.)
-    let expected_size = if is_2bit {
-        (width_u.max(16) as usize * height_u.max(8) as usize * 2).div_ceil(8)
-    } else {
-        (width_u.max(8) as usize * height_u.max(8) as usize * 4).div_ceil(8)
+    let Some(expected_size) = pvrtc_payload_size(internalformat, width, height) else {
+        log!(
+            "Warning: try_decode_pvrtc: payload size overflows for {width}x{height} \
+             (level {level}, format {internalformat:#x}); skipping upload."
+        );
+        return true;
     };
     if pvrtc_data.len() != expected_size {
         log!(
@@ -312,10 +379,6 @@ pub fn try_decode_pvrtc(
         return true;
     }
 
-    let is_opaque = matches!(
-        internalformat,
-        gles11::COMPRESSED_RGB_PVRTC_4BPPV1_IMG | gles11::COMPRESSED_RGB_PVRTC_2BPPV1_IMG
-    );
     let upload_format = gles11::RGBA;
     let Some(pixels) = cached_pvrtc_pixels(
         pvrtc_data,
@@ -374,10 +437,8 @@ pub fn try_decode_pvrtc_sub(
     internalformat: GLenum,
     pvrtc_data: &[u8],
 ) -> bool {
-    let is_2bit = match internalformat {
-        gles11::COMPRESSED_RGB_PVRTC_4BPPV1_IMG | gles11::COMPRESSED_RGBA_PVRTC_4BPPV1_IMG => false,
-        gles11::COMPRESSED_RGB_PVRTC_2BPPV1_IMG | gles11::COMPRESSED_RGBA_PVRTC_2BPPV1_IMG => true,
-        _ => return false,
+    let Some((is_2bit, is_opaque)) = pvrtc_format_properties(internalformat) else {
+        return false;
     };
 
     let Ok(width_u) = u32::try_from(width) else {
@@ -395,10 +456,12 @@ pub fn try_decode_pvrtc_sub(
         return true;
     };
 
-    let expected_size = if is_2bit {
-        (width_u.max(16) as usize * height_u.max(8) as usize * 2).div_ceil(8)
-    } else {
-        (width_u.max(8) as usize * height_u.max(8) as usize * 4).div_ceil(8)
+    let Some(expected_size) = pvrtc_payload_size(internalformat, width, height) else {
+        log!(
+            "Warning: try_decode_pvrtc_sub: payload size overflows for \
+             {width}x{height} (level {level}, format {internalformat:#x}); skipping upload."
+        );
+        return true;
     };
     if pvrtc_data.len() != expected_size {
         log_once_fmt!(
@@ -410,10 +473,6 @@ pub fn try_decode_pvrtc_sub(
         return true;
     }
 
-    let is_opaque = matches!(
-        internalformat,
-        gles11::COMPRESSED_RGB_PVRTC_4BPPV1_IMG | gles11::COMPRESSED_RGB_PVRTC_2BPPV1_IMG
-    );
     let Some(pixels) = cached_pvrtc_pixels(
         pvrtc_data,
         is_2bit,

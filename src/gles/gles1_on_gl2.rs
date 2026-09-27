@@ -23,7 +23,8 @@ use super::gl21compat_raw::types::*;
 use super::gles11_raw as gles11; // constants only
 use super::gles_generic::GLES;
 use super::util::{
-    fixed_to_float, float_to_fixed, matrix_fixed_to_float, try_decode_pvrtc, PalettedTextureFormat,
+    fixed_to_float, float_to_fixed, matrix_fixed_to_float, try_decode_pvrtc,
+    try_decode_pvrtc_sub, PalettedTextureFormat,
     ParamTable, ParamType,
 };
 use super::GLESContext;
@@ -2666,45 +2667,28 @@ impl GLES for GLES1OnGL2<'_> {
     ) {
         assert!(target == gl21::TEXTURE_2D);
         assert!(level >= 0);
-        // PVRTC sub-image updates are very rare (Apple's OpenGL ES 1.1
-        // surface rejects them too), but if we ever see one we
-        // software-decode the entire sub-region to RGBA and use the
-        // uncompressed sub-image path. Paletted formats are not legal here
-        // per the OES_compressed_paletted_texture spec.
-        let data_slice = if data.is_null() {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts(data.cast::<u8>(), image_size as usize)
-        };
-        let is_pvrtc_2bit = matches!(
-            format,
-            gles11::COMPRESSED_RGB_PVRTC_2BPPV1_IMG | gles11::COMPRESSED_RGBA_PVRTC_2BPPV1_IMG
-        );
-        let is_pvrtc_4bit = matches!(
-            format,
-            gles11::COMPRESSED_RGB_PVRTC_4BPPV1_IMG | gles11::COMPRESSED_RGBA_PVRTC_4BPPV1_IMG
-        );
-        if is_pvrtc_2bit || is_pvrtc_4bit {
-            let Ok(width_u) = u32::try_from(width) else {
-                log!("Warning: CompressedTexSubImage2D: invalid width {width}; skipping.");
-                return;
-            };
-            let Ok(height_u) = u32::try_from(height) else {
-                log!("Warning: CompressedTexSubImage2D: invalid height {height}; skipping.");
-                return;
-            };
-            let pixels = crate::image::decode_pvrtc(data_slice, is_pvrtc_2bit, width_u, height_u);
-            gl21::TexSubImage2D(
+        // PVRTC sub-image updates are very rare, but if we see one we
+        // software-decode the sub-region to RGBA and use the uncompressed
+        // sub-image path. `try_decode_pvrtc_sub` validates the payload size
+        // (the sub-rectangle's Morton-ordered block data), forces the alpha
+        // channel to 0xff for opaque RGB formats, and routes through the
+        // cached decoder. Paletted formats are not legal here per the
+        // OES_compressed_paletted_texture spec.
+        if !data.is_null()
+            && image_size > 0
+            && crate::gles::should_decode_pvrtc()
+            && try_decode_pvrtc_sub(
+                self,
                 target,
                 level,
                 xoffset,
                 yoffset,
                 width,
                 height,
-                gl21::RGBA,
-                gl21::UNSIGNED_BYTE,
-                pixels.as_ptr() as *const _,
-            );
+                format,
+                std::slice::from_raw_parts(data.cast::<u8>(), image_size as usize),
+            )
+        {
             return;
         }
         // Forward any format the desktop driver natively understands.

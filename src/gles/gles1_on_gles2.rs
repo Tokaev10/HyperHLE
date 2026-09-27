@@ -15,7 +15,7 @@ use super::gles1_on_gles2_logging::{self, GLES1to2Logger};
 use super::gles2_raw as gl;
 use super::gles2_raw::types::*;
 use super::gles_generic::{GLchar, GLES};
-use super::util::{fixed_to_float, float_to_fixed, try_decode_pvrtc};
+use super::util::{fixed_to_float, float_to_fixed, try_decode_pvrtc, try_decode_pvrtc_sub};
 use super::GLESContext;
 use crate::window::{GLContext, GLVersion, Window};
 use std::collections::{HashMap, HashSet};
@@ -2232,6 +2232,28 @@ impl GLES for GLES1OnGLES2<'_> {
         image_size: GLsizei,
         data: *const GLvoid,
     ) {
+        // Streamed PVRTC sub-image updates (level loaders) must not pass
+        // compressed data through to hosts that lack
+        // `GL_IMG_texture_compression_pvrtc`: the full-upload path above
+        // already stored the texture as plain RGBA, so decode the update too
+        // and keep the two representations consistent.
+        if !data.is_null()
+            && image_size > 0
+            && crate::gles::should_decode_pvrtc()
+            && try_decode_pvrtc_sub(
+                self,
+                target,
+                level,
+                x,
+                y,
+                width,
+                height,
+                format,
+                std::slice::from_raw_parts(data.cast::<u8>(), image_size as usize),
+            )
+        {
+            return;
+        }
         gl::CompressedTexSubImage2D(target, level, x, y, width, height, format, image_size, data);
     }
     unsafe fn GetBufferParameteriv(&mut self, target: GLenum, pname: GLenum, params: *mut GLint) {
@@ -2311,6 +2333,7 @@ impl GLES for GLES1OnGLES2<'_> {
     ) {
         if !data.is_null()
             && image_size > 0
+            && crate::gles::should_decode_pvrtc()
             && try_decode_pvrtc(
                 self,
                 target,
