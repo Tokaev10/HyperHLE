@@ -1401,6 +1401,12 @@ impl Window {
         options: &Options,
         app_gles_usage: Option<crate::mach_o::GlesApiUsage>,
     ) -> Window {
+        // Decide the GLES profile up front from the app's own imports, so
+        // both the SDL context attributes and the backend match it.
+        let app_is_es2_only = app_gles_usage
+            .as_ref()
+            .map(|usage| usage.is_es2_only())
+            .unwrap_or(false);
         if let Some(usage) = app_gles_usage {
             log!(
                 "App OpenGL ES API usage: ES 1.1 fixed-function: {}, ES 2.0 shaders: {}{}",
@@ -1440,6 +1446,44 @@ impl Window {
         if native_cpu_renderer {
             log!("Software rendering selected: using the host's native LLVMPipe CPU rasterizer instead of the built-in fallback");
         }
+        // `--gles-override` (and the app picker's "force GLES version" option)
+        // previously parsed into `gles_override_version` but was never consumed,
+        // so forcing GLES3/3.1/3.2/Metal silently did nothing. Resolve it into
+        // the effective graphics API here: an explicit `--graphics-api` always
+        // wins; the override only refines `Default`.
+        let effective_graphics_api = if matches!(
+            options.graphics_api,
+            crate::options::GraphicsApi::Default
+        ) {
+            match options.gles_override_version {
+                crate::options::GlesOverrideVersion::Default => options.graphics_api,
+                crate::options::GlesOverrideVersion::Gles10 => {
+                    log!("GLES override: forcing OpenGL ES 1.0 context");
+                    crate::options::GraphicsApi::GLES10
+                }
+                crate::options::GlesOverrideVersion::Gles11 => {
+                    log!("GLES override: forcing OpenGL ES 1.1 context");
+                    crate::options::GraphicsApi::GLES11
+                }
+                crate::options::GlesOverrideVersion::Gles20 => {
+                    log!("GLES override: forcing OpenGL ES 2.0 context");
+                    crate::options::GraphicsApi::GLES20
+                }
+                crate::options::GlesOverrideVersion::Gles30
+                | crate::options::GlesOverrideVersion::Gles31
+                | crate::options::GlesOverrideVersion::Gles32 => {
+                    log!("GLES override: forcing OpenGL ES 3.x context");
+                    crate::options::GraphicsApi::GLES30
+                }
+                crate::options::GlesOverrideVersion::Metal => {
+                    log!("GLES override: forcing the GLES2 compatibility path used for the Metal translator");
+                    crate::options::GraphicsApi::GLES20
+                }
+            }
+        } else {
+            options.graphics_api
+        };
+
         let frame_generation = options.frame_generation;
         let rtcs = options.rtcs;
         if frame_generation && software_presentation {
@@ -1482,12 +1526,15 @@ impl Window {
                         | crate::options::GraphicsApi::Metal
                         | crate::options::GraphicsApi::Wgpu
                         | crate::options::GraphicsApi::Vulkan
-                ) || (matches!(options.graphics_api, crate::options::GraphicsApi::Default)
-                    && (options.prefer_gles2_context || angle_driver_active || llvmpipe_active));
+                ) || (matches!(effective_graphics_api, crate::options::GraphicsApi::Default)
+                    && (app_is_es2_only
+                        || options.prefer_gles2_context
+                        || angle_driver_active
+                        || llvmpipe_active));
 
             if use_gles2 {
                 let version = if matches!(
-                    options.graphics_api,
+                    effective_graphics_api,
                     crate::options::GraphicsApi::GLES30
                         | crate::options::GraphicsApi::TranslatorGLES30
                 ) {
@@ -1726,7 +1773,7 @@ impl Window {
                 .construct(&mut window)
                 .expect("Could not create software GLES context")
         } else {
-            match options.graphics_api {
+            match effective_graphics_api {
                 crate::options::GraphicsApi::Translator => {
                     create_gles1_translator_ctx_no_parent_stack(&mut window)
                 }
@@ -1751,7 +1798,11 @@ impl Window {
                     create_gles2_ctx_no_parent_stack(&mut window)
                 }
                 crate::options::GraphicsApi::Default => {
-                    if llvmpipe_active {
+                    if app_is_es2_only {
+                        // The app never imports the ES 1.1 entry points, so an
+                        // ES 1.x translator would never be used.
+                        create_gles2_ctx_no_parent_stack(&mut window)
+                    } else if llvmpipe_active {
                         create_gles1_translator_ctx_no_parent_stack(&mut window)
                     } else if options.prefer_gles2_context || angle_driver_active {
                         create_gles2_ctx_no_parent_stack(&mut window)

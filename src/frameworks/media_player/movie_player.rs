@@ -488,6 +488,31 @@ fn schedule_preload_sequence(env: &mut Environment, this: id) {
         host.preload_scheduled = true;
     }
 
+    // `--skip-intros`: fast-forward the whole lifecycle instead of playing.
+    // The notifications still flow so apps that only advance on
+    // `PlaybackDidFinish` (BioShock's intro screen among them) progress.
+    if env.options.skip_intros {
+        let host = env
+            .objc
+            .borrow_mut::<MPMoviePlayerControllerHostObject>(this);
+        host.finish_scheduled = true;
+        host.load_state = MPMovieLoadStatePlayable
+            | MPMovieLoadStatePlaythroughOK;
+        host.ready_for_display = true;
+        log!(
+            "MPMoviePlayerController: --skip-intros is active; finishing the movie immediately"
+        );
+        enqueue(
+            env,
+            PendingNotification::PlaybackDidFinish {
+                player: this,
+                reason: MPMovieFinishReasonUserExited,
+            },
+            Instant::now(),
+        );
+        return;
+    }
+
     // Check whether the file actually exists on disk so we can report a
     // meaningful finish reason later.
     let playback_error_reason = {

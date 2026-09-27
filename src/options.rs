@@ -527,6 +527,12 @@ pub struct Options {
     pub texture_filtering: TextureFiltering,
     pub pvrtc_decoding: PvrtcDecoding,
     pub no_texture_compression: bool,
+    /// Skip guest intro/cutscene videos as fast as possible instead of
+    /// playing them (`--skip-intros`, inspired by the `-novideo` flag of
+    /// DamnWrapper32_ARMv7). The movie still goes through the full
+    /// notification lifecycle so apps that gate progress on
+    /// `MPMoviePlayerPlaybackDidFinishNotification` advance normally.
+    pub skip_intros: bool,
     pub memory_management: MemoryManagement,
     pub anti_aliasing: u8,
     pub software_presentation: bool,
@@ -604,6 +610,7 @@ impl Default for Options {
             verbose_logging: false,
             shader_compatibility_fixes: true,
             fix_texture_min_filter: cfg!(target_os = "android"),
+            skip_intros: false,
             software_rendering: false,
             anisotropic_filtering: 1,
             texture_upscaler: 1,
@@ -868,6 +875,10 @@ impl Options {
             self.no_texture_compression = true;
         } else if arg == "--allow-texture-compression" {
             self.no_texture_compression = false;
+        } else if arg == "--skip-intros" || arg == "--novideo" {
+            self.skip_intros = true;
+        } else if arg == "--no-skip-intros" {
+            self.skip_intros = false;
         } else if let Some(value) = arg.strip_prefix("--memory-management=") {
             self.memory_management = MemoryManagement::parse(value)?;
         } else if let Some(value) = arg.strip_prefix("--anti-aliasing=") {

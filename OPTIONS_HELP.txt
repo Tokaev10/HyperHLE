@@ -536,3 +536,7 @@ Game options:
         Enable or disable the optional in-game Cheat Engine memory search and
         patch overlay. It is disabled by default and can also be toggled in
         the app picker settings.
+    --skip-intros / --no-skip-intros
+        Skip full-screen intro movies: each movie reports an immediate
+        user-exited finish notification, so games advance straight to the
+        menu without decoding video. Off by default.
