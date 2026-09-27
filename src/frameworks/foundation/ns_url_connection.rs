@@ -158,7 +158,7 @@ pub(crate) fn perform_http_request(
         builder = builder.set(name, value);
     }
     if !has_user_agent {
-        builder = builder.set("User-Agent", "MetalHLE 0.1");
+        builder = builder.set("User-Agent", "MetalHLE 1.0");
     }
     let result = if body.is_empty() && method.eq_ignore_ascii_case("GET") {
         builder.call()

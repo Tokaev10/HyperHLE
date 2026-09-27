@@ -96,8 +96,20 @@ pub fn set_onscreen_hud_architecture(architecture: &str) {
 fn refresh_hud_metrics() {
     let mutex = HUD_METRICS.get_or_init(|| Mutex::new(HudMetrics::default()));
     if let Ok(mut metrics) = mutex.lock() {
-        metrics.cpu_percent = process_cpu_percent();
-        metrics.gpu_percent = gpu_percent();
+        // Exponential moving averages keep the HUD readable: instantaneous
+        // /proc and kgsl samples swing wildly between refreshes, which made
+        // the CPU/GPU readouts flip between implausibly high and low values.
+        const ALPHA: f32 = 0.4; // weight of the newest sample
+        metrics.cpu_percent = match (metrics.cpu_percent, process_cpu_percent()) {
+            (Some(old), Some(new)) => Some(old + ALPHA * (new - old)),
+            (None, new) => new,
+            (old, None) => old,
+        };
+        metrics.gpu_percent = match (metrics.gpu_percent, gpu_percent()) {
+            (Some(old), Some(new)) => Some(old + ALPHA * (new - old)),
+            (None, new) => new,
+            (old, None) => old,
+        };
         metrics.ram_mb = resident_memory_mb();
     }
     update_hud_text();

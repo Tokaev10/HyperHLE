@@ -151,7 +151,7 @@ fn vkEnumerateInstanceLayerProperties(
             write_name(&mut property.layer_name, name);
             write_name(
                 &mut property.description,
-                "MetalHLE 0.1 Vulkan compatibility layer",
+                "MetalHLE 1.0 Vulkan compatibility layer",
             );
             write_struct(env, (properties + index as u32).cast(), property);
         }

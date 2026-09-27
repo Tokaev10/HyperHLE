@@ -1,8 +1,8 @@
 #!/bin/sh
 set -e
 
-# Bundles the MetalHLE 0.1 executable with the basic set of files needed for
-# MetalHLE 0.1 to run (the same ones found in the macOS .app bundle or Android APK).
+# Bundles the MetalHLE 1.0 executable with the basic set of files needed for
+# MetalHLE 1.0 to run (the same ones found in the macOS .app bundle or Android APK).
 # This does not prepare a full release.
 
 if [ "$#" -eq 1 ]; then

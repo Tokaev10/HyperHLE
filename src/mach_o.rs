@@ -101,6 +101,24 @@ pub fn detect_architecture(
     }
 }
 
+/// Does this Mach-O (thin or fat) contain both an ARM32 and an ARM64 slice?
+/// Used by the app picker to offer a 32/64-bit choice at launch time.
+pub fn has_both_arm_slices(bytes: &[u8]) -> bool {
+    let mut cursor = Cursor::new(bytes);
+    match OFile::parse(&mut cursor) {
+        Ok(OFile::FatFile { files, .. }) => {
+            let has_arm32 = files
+                .iter()
+                .any(|(arch, _)| arch.cputype == mach_object::CPU_TYPE_ARM);
+            let has_arm64 = files
+                .iter()
+                .any(|(arch, _)| arch.cputype == mach_object::CPU_TYPE_ARM64);
+            has_arm32 && has_arm64
+        }
+        _ => false,
+    }
+}
+
 /// Which OpenGL ES API generations an executable references, judged from the
 /// OpenGL ES symbols it imports. See [scan_gles_api_usage].
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]

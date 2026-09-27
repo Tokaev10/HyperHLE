@@ -43,6 +43,9 @@ use std::time::{Duration, Instant};
 
 struct AppInfo {
     path: PathBuf,
+    /// Set when the app's executable is a fat binary containing both ARM32
+    /// and ARM64 slices; the picker then asks which one to launch.
+    fat_both: bool,
     display_name: String,
     icon: Option<Image>,
     /// `NSString*`
@@ -128,6 +131,11 @@ fn enumerate_apps(apps_dir: &Path) -> Result<Vec<AppInfo>, std::io::Error> {
                 };
 
                 let display_name = bundle.display_name().to_owned();
+                let fat_both = fs
+                    .read(bundle.executable_path())
+                    .map(|bytes| crate::mach_o::has_both_arm_slices(&bytes))
+                    .unwrap_or(false);
+
                 let icon = match bundle.load_icon(&fs) {
                     Ok(icon) => Some(icon),
                     Err(e) => {
@@ -138,6 +146,7 @@ fn enumerate_apps(apps_dir: &Path) -> Result<Vec<AppInfo>, std::io::Error> {
 
                 apps.push(AppInfo {
                     path: app_path,
+                    fat_both,
                     display_name,
                     icon,
                     display_name_ns_string: None,
@@ -312,6 +321,9 @@ struct AppPickerDelegateHostObject {
     icon_tapped: id,
     icon_scroll_page: Option<usize>,
     add_ipa: bool,
+    /// Architecture-chooser choice: `Some(true)` = ARM64, `Some(false)` = ARM32.
+    arch_pick: Option<bool>,
+    arch_cancel: bool,
     copyright_show: bool,
     copyright_hide: bool,
     copyright_prev: bool,
@@ -453,11 +465,23 @@ const CLASSES: ClassExports = objc_classes! {
 - (())copyrightInfoHide {
     env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).copyright_hide = true;
 }
+
 - (())copyrightInfoPrevPage {
     env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).copyright_prev = true;
 }
 - (())copyrightInfoNextPage {
     env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).copyright_next = true;
+}
+
+
+- (())archPick32 {
+    env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).arch_pick = Some(false);
+}
+- (())archPick64 {
+    env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).arch_pick = Some(true);
+}
+- (())archPickCancel {
+    env.objc.borrow_mut::<AppPickerDelegateHostObject>(this).arch_cancel = true;
 }
 
 - (())quickOptionsShow {
@@ -1057,7 +1081,7 @@ fn app_picker_inner(
         let text = ns_string::from_rust_string(
             env,
             format!(
-                "MetalHLE 0.1 {}{}{}",
+                "MetalHLE 1.0 {}{}{}",
                 crate::branding(),
                 if crate::branding().is_empty() {
                     ""
@@ -1136,6 +1160,7 @@ fn app_picker_inner(
 
     let copyright_info_text = crate::licenses::get_text();
     let mut copyright_info_stuff = setup_copyright_info(env, delegate, main_view, app_frame);
+    let arch_dialog = setup_arch_dialog(env, delegate, main_view, app_frame);
     let mut copyright_info_page_idx = 0;
 
     let host_resolutions = crate::window::host_screen_resolutions();
@@ -1458,6 +1483,8 @@ fn app_picker_inner(
     let apps_dir = paths::user_data_base_path().join(paths::APPS_DIR);
     let mut current_page = 0;
     let mut awaited_ipa: Option<IpaWatch> = None;
+    // App whose launch is paused while the user picks an architecture slice.
+    let mut arch_dialog_pending: Option<PathBuf> = None;
 
     let main_run_loop: id = msg_class![env; NSRunLoop mainRunLoop];
     // If an app is picked, this loop returns. If the user quits touchHLE, the
@@ -1492,6 +1519,20 @@ fn app_picker_inner(
                     run_run_loop_single_iteration(env, main_run_loop);
 
                     let app_path = &apps.as_ref().unwrap()[app_idx].path;
+                    if apps.as_ref().unwrap()[app_idx].fat_both {
+                        // Universal app: ask the user which slice to run
+                        // before launching, instead of silently preferring
+                        // ARM32.
+                        echo!(
+                            "Picked: {} (universal app: asking which architecture to launch)",
+                            app_path.display()
+                        );
+                        () = msg![env; (arch_dialog.backdrop) setHidden:false];
+                        () = msg![env; (arch_dialog.main_view) setHidden:false];
+                        () = msg![env; (arch_dialog.main_view) bringSubviewToFront:(arch_dialog.backdrop)];
+                        arch_dialog_pending = Some(app_path.clone());
+                        continue;
+                    }
                     echo!("Picked: {}", app_path.display());
                     break app_path.clone();
                 }
@@ -1514,6 +1555,25 @@ fn app_picker_inner(
             if let Err(e) = crate::window::launch_ipa_picker(env) {
                 echo!("Couldn't open IPA picker: {}", e);
             }
+        } else if let Some(pick_64) = host_obj.arch_pick.take() {
+            if let Some(app_path) = arch_dialog_pending.take() {
+                () = msg![env; (arch_dialog.main_view) setHidden:true];
+                () = msg![env; (arch_dialog.backdrop) setHidden:true];
+                if pick_64 {
+                    option_args.push("--force-64-bit".to_string());
+                } else {
+                    option_args.push("--force-32-bit".to_string());
+                }
+                echo!("Picked: {} ({} slice)", app_path.display(), if pick_64 { "ARM64" } else { "ARM32" });
+                break app_path;
+            }
+        } else if std::mem::take(&mut host_obj.arch_cancel) {
+            // User dismissed the architecture chooser.
+            if let Some(app_path) = arch_dialog_pending.take() {
+                echo!("Cancelled launch of {}", app_path.display());
+            }
+            () = msg![env; (arch_dialog.main_view) setHidden:true];
+            () = msg![env; (arch_dialog.backdrop) setHidden:true];
         } else if std::mem::take(&mut host_obj.copyright_show) {
             copyright_info_page_idx = 0;
             change_copyright_page(
@@ -3012,6 +3072,120 @@ struct CopyrightInfoStuff {
     last_page_idx: Option<usize>,
     prev_page_button: id,
     next_page_button: id,
+}
+
+struct ArchDialogStuff {
+    backdrop: id,
+    main_view: id,
+}
+
+/// Modal dialog shown when a tapped app contains both ARM32 and ARM64
+/// slices, letting the user pick which slice to launch.
+fn setup_arch_dialog(
+    env: &mut Environment,
+    delegate: id,
+    super_view: id,
+    app_frame: CGRect,
+) -> ArchDialogStuff {
+    let ui_scale = picker_ui_scale(app_frame.size);
+
+    let backdrop_frame = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: app_frame.size,
+    };
+    let backdrop: id = msg_class![env; UIView alloc];
+    let backdrop: id = msg![env; backdrop initWithFrame:backdrop_frame];
+    let backdrop_color: id = msg_class![env; UIColor blackColor];
+    () = msg![env; backdrop setBackgroundColor:backdrop_color];
+    () = msg![env; backdrop setAlpha:(0.6 as CGFloat)];
+    () = msg![env; backdrop setHidden:true];
+    () = msg![env; super_view addSubview:backdrop];
+
+    let panel_width = (app_frame.size.width * 0.8).clamp(240.0, 560.0);
+    let panel_height = 190.0 * ui_scale;
+    let panel_frame = CGRect {
+        origin: CGPoint {
+            x: (app_frame.size.width - panel_width) / 2.0,
+            y: (app_frame.size.height - panel_height) / 2.0,
+        },
+        size: CGSize {
+            width: panel_width,
+            height: panel_height,
+        },
+    };
+    let main_view: id = msg_class![env; UIView alloc];
+    let main_view: id = msg![env; main_view initWithFrame:panel_frame];
+    let bg_color: id = msg_class![env; UIColor darkGrayColor];
+    () = msg![env; main_view setBackgroundColor:bg_color];
+    let main_layer: id = msg![env; main_view layer];
+    () = msg![env; main_layer setCornerRadius:(10.0 as CGFloat)];
+    () = msg![env; main_view setHidden:true];
+    () = msg![env; super_view addSubview:main_view];
+
+    let title_frame = CGRect {
+        origin: CGPoint {
+            x: 10.0,
+            y: 12.0 * ui_scale,
+        },
+        size: CGSize {
+            width: panel_width - 20.0,
+            height: 56.0 * ui_scale,
+        },
+    };
+    let title: id = msg_class![env; UILabel alloc];
+    let title: id = msg![env; title initWithFrame:title_frame];
+    let title_text = ns_string::get_static_str(
+        env,
+        "This app has both 32-bit and 64-bit support.\nWhich version do you want to launch?",
+    );
+    () = msg![env; title setText:title_text];
+    () = msg![env; title setTextAlignment:UITextAlignmentCenter];
+    () = msg![env; title setNumberOfLines:0];
+    let title_color: id = msg_class![env; UIColor whiteColor];
+    () = msg![env; title setTextColor:title_color];
+    let title_bg: id = msg_class![env; UIColor clearColor];
+    () = msg![env; title setBackgroundColor:title_bg];
+    let title_font = picker_font(env, 13.0 * ui_scale);
+    () = msg![env; title setFont:title_font];
+    () = msg![env; main_view addSubview:title];
+
+    let button_width = panel_width - 40.0;
+    let button_height = 34.0 * ui_scale;
+    let button_x = 20.0;
+    let mut button_y = 76.0 * ui_scale;
+    for (label, selector_name, emphasized) in [
+        ("Launch 32-bit (recommended)", "archPick32", true),
+        ("Launch 64-bit (experimental)", "archPick64", false),
+        ("Cancel", "archPickCancel", false),
+    ] {
+        let button: id = msg_class![env; UIButton buttonWithType:UIButtonTypeCustom];
+        let text = ns_string::get_static_str(env, label);
+        () = msg![env; button setTitle:text forState:UIControlStateNormal];
+        let label_view: id = msg![env; button titleLabel];
+        let font = picker_font(env, 12.0 * ui_scale);
+        () = msg![env; label_view setFont:font];
+        let text_color: id = msg_class![env; UIColor whiteColor];
+        () = msg![env; button setTitleColor:text_color forState:UIControlStateNormal];
+        let color: id = if emphasized {
+            msg_class![env; UIColor magentaColor]
+        } else {
+            msg_class![env; UIColor darkGrayColor]
+        };
+        () = msg![env; button setBackgroundColor:color];
+        () = msg![env; button setFrame:(CGRect {
+            origin: CGPoint { x: button_x, y: button_y },
+            size: CGSize { width: button_width, height: button_height },
+        })];
+        () = msg![env; button layoutSubviews];
+        let selector = env.objc.lookup_selector(selector_name).unwrap();
+        () = msg![env; button addTarget:delegate
+                                 action:selector
+                       forControlEvents:UIControlEventTouchUpInside];
+        () = msg![env; main_view addSubview:button];
+        button_y += button_height + 8.0 * ui_scale;
+    }
+
+    ArchDialogStuff { backdrop, main_view }
 }
 
 fn setup_copyright_info(

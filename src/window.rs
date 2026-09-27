@@ -1305,7 +1305,10 @@ fn allowed_cpu_list() -> Option<Vec<usize>> {
     for part in list.split(',') {
         let mut bounds = part.splitn(2, '-');
         let start: usize = bounds.next()?.trim().parse().ok()?;
-        let end: usize = bounds.next().map(|b| b.trim().parse().ok()).transpose()?.unwrap_or(start);
+        let end: usize = bounds
+            .next()
+            .and_then(|b| b.trim().parse().ok())
+            .unwrap_or(start);
         cpus.extend(start..=end);
     }
     Some(cpus)
@@ -1452,10 +1455,6 @@ impl Window {
     ) -> Window {
         // Decide the GLES profile up front from the app's own imports, so
         // both the SDL context attributes and the backend match it.
-        let app_is_es2_only = app_gles_usage
-            .as_ref()
-            .map(|usage| usage.is_es2_only())
-            .unwrap_or(false);
         if let Some(usage) = app_gles_usage {
             log!(
                 "App OpenGL ES API usage: ES 1.1 fixed-function: {}, ES 2.0 shaders: {}{}",
@@ -1576,10 +1575,7 @@ impl Window {
                         | crate::options::GraphicsApi::Wgpu
                         | crate::options::GraphicsApi::Vulkan
                 ) || (matches!(effective_graphics_api, crate::options::GraphicsApi::Default)
-                    && (app_is_es2_only
-                        || options.prefer_gles2_context
-                        || angle_driver_active
-                        || llvmpipe_active));
+                    && (options.prefer_gles2_context || angle_driver_active || llvmpipe_active));
 
             if use_gles2 {
                 let version = if matches!(
@@ -1847,11 +1843,13 @@ impl Window {
                     create_gles2_ctx_no_parent_stack(&mut window)
                 }
                 crate::options::GraphicsApi::Default => {
-                    if app_is_es2_only {
-                        // The app never imports the ES 1.1 entry points, so an
-                        // ES 1.x translator would never be used.
-                        create_gles2_ctx_no_parent_stack(&mut window)
-                    } else if llvmpipe_active {
+                    // Note: the DamnWrapper32-style ES auto-select
+                    // (`app_is_es2_only`) was removed from this decision --
+                    // it destabilised some titles (e.g. BioShock). The
+                    // Default backend again follows only explicit
+                    // user/driver signals; the usage scan is still logged
+                    // for diagnostics.
+                    if llvmpipe_active {
                         create_gles1_translator_ctx_no_parent_stack(&mut window)
                     } else if options.prefer_gles2_context || angle_driver_active {
                         create_gles2_ctx_no_parent_stack(&mut window)
@@ -3467,9 +3465,9 @@ impl Window {
                 // Also show FPS in the window title so it's visible when the
                 // app is running fullscreen or without console.
                 let base_title = if crate::branding().is_empty() {
-                    format!("MetalHLE 0.1 {}", crate::VERSION)
+                    format!("MetalHLE 1.0 {}", crate::VERSION)
                 } else {
-                    format!("MetalHLE 0.1 {} {}", crate::branding(), crate::VERSION)
+                    format!("MetalHLE 1.0 {} {}", crate::branding(), crate::VERSION)
                 };
                 let title = format!("{} - FPS: {:.1}", base_title, fps);
                 // Ignore any error setting the title.
@@ -3853,7 +3851,7 @@ pub fn show_error_messagebox(window: Option<&Window>, error_message: &str) {
         messagebox::MessageBoxFlag::ERROR,
         &mbox,
         "touchHLE crashed!",
-        &format!("MetalHLE 0.1 crashed with the following error: {error_message}"),
+        &format!("MetalHLE 1.0 crashed with the following error: {error_message}"),
         window.map(|win| &win.window),
         None,
     ) else {

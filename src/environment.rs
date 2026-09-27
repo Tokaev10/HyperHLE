@@ -546,7 +546,7 @@ let default_ipad = DeviceFamily::iPad2;
             };
             Some(Box::new(window::Window::new(
                 &format!(
-                    "{} (MetalHLE 0.1 {}{}{})",
+                    "{} (MetalHLE 1.0 {}{}{})",
                     bundle.display_name(),
                     super::branding(),
                     if super::branding().is_empty() {
@@ -969,7 +969,7 @@ let default_ipad = DeviceFamily::iPad2;
         assert!(!options.headless);
         let window = Some(Box::new(window::Window::new(
             &format!(
-                "MetalHLE 0.1 {}{}{}",
+                "MetalHLE 1.0 {}{}{}",
                 super::branding(),
                 if super::branding().is_empty() {
                     ""

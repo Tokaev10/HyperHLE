@@ -39,8 +39,8 @@ android {
         def branding = getTouchHLEBranding()
         applicationId 'org.metalhle.android'
         applicationIdSuffix(branding.isEmpty() ? null : branding.toLowerCase())
-        resValue 'string', 'app_name', 'MetalHLE 0.1'
-        buildConfigField 'String', 'APP_NAME', '"MetalHLE 0.1"'
+        resValue 'string', 'app_name', 'MetalHLE 1.0'
+        buildConfigField 'String', 'APP_NAME', '"MetalHLE 1.0"'
         manifestPlaceholders = [
                 icon: join('@drawable/icon', '_', branding.toLowerCase())
         ]

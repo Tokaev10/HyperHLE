@@ -1,5 +1,5 @@
 #!/bin/sh
-# Package MetalHLE 0.1 release zips and write release notes for action-gh-release.
+# Package MetalHLE 1.0 release zips and write release notes for action-gh-release.
 set -eu
 
 VERSION="$1"
@@ -77,7 +77,7 @@ rm -rf release
 mkdir -p release
 
 {
-    printf '%s\n\n' "MetalHLE 0.1 ${VERSION}"
+    printf '%s\n\n' "MetalHLE 1.0 ${VERSION}"
     if [ "${FORCE_METALHLE_RELEASE:-}" = "true" ]; then
         printf '%s\n\n' "_Manual release — changelog shows the latest 5 commits._"
     fi

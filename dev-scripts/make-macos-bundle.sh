@@ -11,10 +11,10 @@ if [[ $# == 3 ]]; then
     shift 3
 
     if [[ "x$BRANDING" == "x" ]]; then
-        APP_NAME="MetalHLE 0.1"
+        APP_NAME="MetalHLE 1.0"
         ICON_NAME=icon
     else
-        APP_NAME="MetalHLE 0.1 $BRANDING"
+        APP_NAME="MetalHLE 1.0 $BRANDING"
         ICON_NAME="icon_$(echo "$BRANDING" | tr 'A-Z' 'a-z')"
         VERSION="$VERSION $BRANDING"
     fi

@@ -253,6 +253,10 @@ fn NSSearchPathForDirectoriesInDomains(
         NSApplicationDirectory => GuestPath::new(crate::fs::APPLICATIONS).to_owned(),
         NSDocumentDirectory => env.fs.home_directory().join("Documents"),
         NSLibraryDirectory => env.fs.home_directory().join("Library"),
+        // TODO: Guest apps can fill Library/Caches unboundedly across runs
+        // and the host never reclaims that space. Add automatic cleanup of
+        // stale guest cache directories (per bundle ID) at app exit or
+        // startup, or expose it as a setting.
         NSCachesDirectory => env.fs.home_directory().join("Library/Caches"),
         NSApplicationSupportDirectory => {
             env.fs.home_directory().join("Library/Application Support")

@@ -884,7 +884,7 @@ pub fn run(
             }
         }
         Some(Box::new(crate::window::Window::new(
-            "MetalHLE 0.1 ARM64",
+            "MetalHLE 1.0 ARM64",
             None,
             None,
             &window_options,
