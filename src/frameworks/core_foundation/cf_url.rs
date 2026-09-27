@@ -1106,11 +1106,6 @@ fn CFURLCreateDataAndPropertiesFromResource(
 
 // MARK: - Type Info
 
-fn CFURLGetTypeID(_env: &mut Environment) -> u32 {
-    // Return a fake CFTypeID for CFURL
-    0x4346554C // 'CFUL' in hex
-}
-
 // MARK: - Exports
 
 pub const FUNCTIONS: FunctionExports = &[

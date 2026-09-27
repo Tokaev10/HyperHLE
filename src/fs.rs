@@ -807,6 +807,38 @@ pub struct Fs {
     working_directory: GuestPathBuf,
     home_directory: GuestPathBuf,
 }
+
+/// Derive a stable, per-app install UUID (UUIDv5-style: SHA-1 over a fixed
+/// namespace concatenated with the bundle ID, trimmed to 128 bits with the
+/// version-5 and RFC-4122 variant bits set). Real devices assign a random
+/// UUID per install; deriving it from the bundle ID keeps the guest-visible
+/// `/var/mobile/Applications/<uuid>` path stable across launches (saves that
+/// hard-code the path keep working) while giving every app its own directory,
+/// instead of every app sharing the all-zero UUID.
+pub fn install_uuid_for_bundle_id(bundle_id: &str) -> String {
+    use sha1::{Digest, Sha1};
+
+    // Namespace: fixed, self-describing, constant across launches.
+    const NAMESPACE: &[u8] = b"MetalHLE-Install-UUID-Namespace-v1";
+    let mut hasher = Sha1::new();
+    hasher.update(NAMESPACE);
+    hasher.update(bundle_id.as_bytes());
+    let hash = hasher.finalize();
+
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    // Version 5 (SHA-1 name-based) and RFC 4122 variant bits.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+        bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12],
+        bytes[13], bytes[14], bytes[15]
+    )
+}
+
 impl Fs {
     /// Construct a filesystem containing a home directory for the app, its
     /// bundle and documents, and the bundled shared libraries.
@@ -827,6 +859,7 @@ impl Fs {
     /// A directory will be
     /// created at that path if it does not already exist.
     ///
+
     /// `read_only_mode` can be used when the app won't actually be run, just
     /// just inspected (e.g. to retrieve display name and icon), so no user data
     /// directories are required and no sandbox directory will be created on the
@@ -837,8 +870,8 @@ impl Fs {
         bundle_id: &str,
         read_only_mode: bool,
     ) -> (Fs, GuestPathBuf) {
-        const FAKE_UUID: &str = "00000000-0000-0000-0000-000000000000";
-        let home_directory = APPLICATIONS.join(FAKE_UUID);
+        let install_uuid = install_uuid_for_bundle_id(bundle_id);
+        let home_directory = APPLICATIONS.join(&install_uuid);
         let bundle_guest_path = home_directory.join(&bundle_dir_name);
         let working_directory = bundle_guest_path.clone();
 
@@ -1020,7 +1053,7 @@ impl Fs {
                         .with_child(
                             "Applications",
                             FsNode::dir().with_child(
-                                FAKE_UUID,
+                                install_uuid.as_str(),
                                 FsNode::Directory {
                                     children: app_dir_children,
                                     writeable: app_sandbox_host_path,

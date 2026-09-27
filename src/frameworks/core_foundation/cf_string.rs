@@ -1522,21 +1522,81 @@ fn CFStringTransform(
             () = msg![env; string setString:folded];
             true
         }
-        kCFStringTransformToLatin => {
-            // For non-Latin scripts, transliterate to Latin
-            // This is very complex - just log for now
-            false
+        kCFStringTransformToLatin if !reverse => {
+            // Real transliteration for the scripts games actually use
+            // (Cyrillic, Greek). Latin/ASCII content is returned unchanged,
+            // matching CF (the transform is identity on Latin scripts).
+            let original = ns_string::to_rust_string(env, string);
+            let transliterated = transliterate_to_latin(&original);
+            if transliterated != original {
+                let new_str = ns_string::from_rust_string(env, transliterated);
+                () = msg![env; string setString:new_str];
+            }
+            true
         }
         _ => false,
     }
 }
 
-// MARK: - Type info
+/// Transliterate non-Latin characters to their Latin equivalents, following
+/// the conventional (BGN/PCGN-style) romanisation Apple applies for
+/// `kCFStringTransformToLatin`. Unmapped characters pass through unchanged.
+fn transliterate_to_latin(s: &str) -> String {
+    // Lowercase Cyrillic + Greek romanisation table.
+    fn lower_map(c: char) -> Option<&'static str> {
+        Some(match c {
+            // Russian
+            'а' => "a", 'б' => "b", 'в' => "v", 'г' => "g", 'д' => "d",
+            'е' => "e", 'ё' => "yo", 'ж' => "zh", 'з' => "z", 'и' => "i",
+            'й' => "y", 'к' => "k", 'л' => "l", 'м' => "m", 'н' => "n",
+            'о' => "o", 'п' => "p", 'р' => "r", 'с' => "s", 'т' => "t",
+            'у' => "u", 'ф' => "f", 'х' => "kh", 'ц' => "ts", 'ч' => "ch",
+            'ш' => "sh", 'щ' => "shch", 'ъ' => "\u{2019}", 'ы' => "y",
+            'ь' => "\u{2019}", 'э' => "e", 'ю' => "yu", 'я' => "ya",
+            // Ukrainian / Belarusian
+            'і' => "i", 'ї' => "yi", 'є' => "ye", 'ґ' => "g", 'ў' => "u",
+            // Serbian / Macedonian
+            'ђ' => "\u{111}", 'ј' => "j", 'љ' => "lj", 'њ' => "nj",
+            'ћ' => "ć", 'џ' => "dž", 'ќ' => "ķ", 'ѓ' => "ǵ",
+            // Bulgarian-specific: щ/ъ handled above; й above.
+            // Greek
+            'α' => "a", 'β' => "v", 'γ' => "g", 'δ' => "d", 'ε' => "e",
+            'ζ' => "z", 'η' => "i", 'θ' => "th", 'ι' => "i", 'κ' => "k",
+            'λ' => "l", 'μ' => "m", 'ν' => "n", 'ξ' => "x", 'ο' => "o",
+            'π' => "p", 'ρ' => "r", 'σ' => "s", 'ς' => "s", 'τ' => "t",
+            'υ' => "y", 'φ' => "f", 'χ' => "ch", 'ψ' => "ps", 'ω' => "o",
+            _ => return None,
+        })
+    }
 
-fn CFStringGetTypeID(_env: &mut Environment) -> u32 {
-    // Return a fake CFTypeID for CFString
-    0x43465374 // 'CFSt' in hex
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if let Some(mapped) = lower_map(c) {
+            out.push_str(mapped);
+        } else if c.is_uppercase() {
+            // Uppercase letters: romanise via the lowercase table, then
+            // capitalise the first letter of the result (Я → Ya, Ш → Sh).
+            match c.to_lowercase().next() {
+                Some(lower) if lower != c => match lower_map(lower) {
+                    Some(mapped) => {
+                        let mut chars = mapped.chars();
+                        if let Some(first) = chars.next() {
+                            out.extend(first.to_uppercase());
+                            out.push_str(chars.as_str());
+                        }
+                    }
+                    None => out.push(c),
+                },
+                _ => out.push(c),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
+
+// MARK: - Type info
 
 // MARK: - Exports
 

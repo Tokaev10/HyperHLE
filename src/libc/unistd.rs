@@ -479,8 +479,10 @@ fn symlink(env: &mut Environment, path1: ConstPtr<u8>, path2: ConstPtr<u8>) -> i
 }
 
 fn gethostname(env: &mut Environment, name: MutPtr<u8>, namelen: GuestUSize) -> i32 {
-    // TODO: define unique hostname once networking is supported
-    let hostname = "touchHLE";
+    // Real hostname derived from the emulated device, consistent with
+    // sysctl hw.machine (e.g. "iPhone2,1") — networked games embed it in
+    // packets and match against peer names.
+    let hostname = env.window().device_family().machine_name().to_owned();
     let len: GuestUSize = hostname.len().try_into().unwrap();
     if namelen <= len {
         // POSIX: name buffer too small -> ENAMETOOLONG. Don't crash the host.

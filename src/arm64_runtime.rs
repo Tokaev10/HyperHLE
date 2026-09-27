@@ -1158,7 +1158,12 @@ fn arm64_stdio_fprintf(
 
 fn arm64_home_directory(bundle_path: &str) -> String {
     bundle_path.rsplit_once('/').map_or_else(
-        || "/var/mobile/Applications/00000000-0000-0000-0000-000000000000".to_owned(),
+        || {
+            format!(
+                "/var/mobile/Applications/{}",
+                crate::fs::install_uuid_for_bundle_id("")
+            )
+        },
         |(parent, _)| parent.to_owned(),
     )
 }

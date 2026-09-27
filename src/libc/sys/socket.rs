@@ -24,7 +24,7 @@
 
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::libc::errno::{
-    set_errno, EACCES, EADDRINUSE, EADDRNOTAVAIL, EAGAIN, EBADF, ECONNREFUSED, ECONNRESET, EINVAL,
+    set_errno, EACCES, EADDRINUSE, EADDRNOTAVAIL, EAGAIN, EBADF, ECONNABORTED, ECONNREFUSED, ECONNRESET, EINVAL,
     EIO, EISCONN, ENETUNREACH, ENOTCONN, EPROTONOSUPPORT, ESOCKTNOSUPPORT, ETIMEDOUT,
 };
 use crate::libc::posix_io::{
@@ -858,11 +858,19 @@ fn select(
                             false
                         }
                         Err(e) => {
-                            panic!("select: Peek for socket {fd} failed: {e}")
+                            // A transient peek failure is not fatal: report
+                            // the socket as not-ready and let the caller retry.
+                            log!("select: Peek for socket {fd} failed: {e}");
+                            false
                         }
                     }
                 }
-                _ => unimplemented!(),
+                sock_type => {
+                    // Unknown socket type (e.g. raw/unix): real select(2)
+                    // simply reports nothing for it rather than aborting.
+                    log_dbg!("select: read_set unhandled socket type {sock_type} for fd {fd}");
+                    false
+                }
             }
         });
         log_dbg!("select: read_set after {:?}", read_set);
@@ -910,7 +918,10 @@ fn select(
                         false
                     }
                 }
-                _ => unimplemented!(),
+                sock_type => {
+                    log_dbg!("select: write_set unhandled socket type {sock_type} for fd {fd}");
+                    false
+                }
             }
         });
         log_dbg!("select: write_set after {:?}", write_set);
@@ -937,14 +948,40 @@ fn select(
                             log_dbg!("No error on TCP socket {}", fd);
                             false
                         }
-                        Ok(Some(error)) => unimplemented!("TCP socket {} error: {:?}", fd, error),
-                        Err(error) => panic!("TCP socket {fd} take_error failed: {error:?}"),
+                        Ok(Some(error)) => {
+                            // POSIX: a socket with a pending error is reported
+                            // in exceptfds, not via abort.
+                            log!("select: TCP socket {fd} has pending error: {error:?}");
+                            true
+                        }
+                        Err(error) => {
+                            log!("select: TCP socket {fd} take_error failed: {error:?}");
+                            false
+                        }
                     }
                 }
                 SOCK_DGRAM => {
-                    todo!()
+                    match socket_host_object
+                        .udp_socket
+                        .as_ref()
+                        .map(|udp| udp.take_error())
+                        .unwrap_or(Ok(None))
+                    {
+                        Ok(None) => false,
+                        Ok(Some(error)) => {
+                            log!("select: UDP socket {fd} has pending error: {error:?}");
+                            true
+                        }
+                        Err(error) => {
+                            log!("select: UDP socket {fd} take_error failed: {error:?}");
+                            false
+                        }
+                    }
                 }
-                _ => unimplemented!(),
+                sock_type => {
+                    log_dbg!("select: error_set unhandled socket type {sock_type} for fd {fd}");
+                    false
+                }
             }
         });
         log_dbg!("select: error_set after {:?}", error_set);
@@ -999,7 +1036,14 @@ fn accept(
         .pending_tcp_stream
         .take()
     {
-        let addr = stream.peer_addr().unwrap();
+        let addr = match stream.peer_addr() {
+            Ok(addr) => addr,
+            Err(e) => {
+                log!("accept: pending stream for socket {socket} has no peer address: {e}");
+                set_errno(env, EAGAIN);
+                return -1;
+            }
+        };
         // We have already accepted TCP socket, we now need to
         // let guest know as well!
         let new_fd = find_or_create_socket(env);
@@ -1013,21 +1057,39 @@ fn accept(
             udp_socket: None,
         };
         State::get_mut(env).sockets.insert(new_fd, host_object);
-        assert!(!address.is_null());
-        let peer_guest_addr = sockaddr::from_sockaddr_v4(&addr);
-        env.mem.write(address, peer_guest_addr);
-        assert_eq!(guest_size_of::<sockaddr>(), env.mem.read(address_len));
-        env.mem.write(address_len, guest_size_of::<sockaddr>());
+        if !address.is_null() {
+            let peer_guest_addr = sockaddr::from_sockaddr_v4(&addr);
+            env.mem.write(address, peer_guest_addr);
+            if !address_len.is_null() {
+                let requested = env.mem.read(address_len) as usize;
+                let full = guest_size_of::<sockaddr>();
+                if requested >= full as usize {
+                    env.mem.write(address_len, full);
+                }
+            }
+        }
         return new_fd;
     }
 
     // re-borrow
-    let socket_host_object = State::get(env).sockets.get(&socket).unwrap();
-    let listener = socket_host_object.tcp_listener.as_ref().unwrap();
+    let listener = State::get(env).sockets.get(&socket).unwrap();
+    let listener = listener.tcp_listener.as_ref().unwrap();
     match listener.accept() {
-        Ok((_, addr)) => {
+        Ok((stream, addr)) => {
             log!("accept: New client: {}", addr);
-            unimplemented!()
+            // A connection arrived but select()/poll() hasn't claimed it yet.
+            // Accept it on the host now, stash it as pending (the same slot
+            // select/poll use) and let the guest's next accept() hand it over,
+            // instead of aborting the whole emulation.
+            stream.set_nonblocking(true).unwrap();
+            let socket_host_object = State::get_mut(env).sockets.get_mut(&socket).unwrap();
+            if socket_host_object.pending_tcp_stream.is_some() {
+                log!("accept: socket {socket} already has a pending stream; dropping new one");
+            } else {
+                socket_host_object.pending_tcp_stream = Some(stream);
+            }
+            set_errno(env, EAGAIN);
+            -1
         }
         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
             // No incoming connection is ready
@@ -1036,10 +1098,14 @@ fn accept(
             // - poll for data in thread scheduling part
             // - write/read/accept/etc data once it is ready
             // - unblock guest thread
-            unimplemented!("accept: TCP listener for socket {} would block on accepting, block current guest thread {}.", socket, env.current_thread)
+            log_dbg!("accept: TCP listener for socket {socket} would block (guest thread {})", env.current_thread);
+            set_errno(env, EAGAIN);
+            -1
         }
         Err(e) => {
-            panic!("accept: Socket {socket} has error accepting connection: {e}");
+            log!("accept: Socket {socket} has error accepting connection: {e}");
+            set_errno(env, ECONNABORTED);
+            -1
         }
     }
 }
