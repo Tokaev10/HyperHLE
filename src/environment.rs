@@ -2721,7 +2721,27 @@ let default_ipad = DeviceFamily::iPad2;
                     continue;
                 }
                 DEADLOCK_GRACE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
-                panic!("No active threads, program has deadlocked!");
+                // Deadlock recovery: a guest thread can die or wedge while
+                // holding a mutex that other threads (often the app's own
+                // crash handler) are blocked on. Instead of killing the
+                // whole app, force-release the wedged mutexes and give the
+                // waiters a chance to proceed. Only if this keeps happening
+                // do we give up with a panic.
+                static DEADLOCK_FORCE_RELEASES: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                let force_releases =
+                    DEADLOCK_FORCE_RELEASES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let released = self.mutex_state.force_release_deadlocked_mutexes();
+                if released.is_empty() || force_releases >= 5 {
+                    panic!("No active threads, program has deadlocked!");
+                }
+                for (mutex_id, owner) in &released {
+                    log!(
+                        "Deadlock recovery: force-released mutex #{} (was owned by thread {}); unblocking waiters.",
+                        mutex_id,
+                        owner
+                    );
+                }
             }
         }
     }

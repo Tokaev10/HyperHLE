@@ -1062,13 +1062,13 @@ impl Mem {
                 return;
             }
             if self.was_freed(addr) {
-                log_once_fmt!(
+                log_dbg_once_fmt!(
                     "Can't free {:#x}: double free detected; repeated invalid frees are suppressed",
                     addr
                 );
                 return;
             }
-            log_once_fmt!(
+            log_dbg_once_fmt!(
                 "Can't free {:#x}: unknown allocation; repeated invalid frees are suppressed",
                 addr
             );

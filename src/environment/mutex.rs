@@ -126,6 +126,25 @@ impl MutexState {
             }
         })
     }
+
+    /// Deadlock recovery: force-release every mutex that still has waiters
+    /// and a recorded owner. This is a last-resort escape hatch for guests
+    /// whose owner thread died or wedged (for example a crash-handler worker
+    /// blocked on a mutex held by a thread stuck in a loop). Waiters wake
+    /// naturally on the next scheduler pass because they poll
+    /// `mutex_is_locked`. Returns the (mutex, former owner) pairs that were
+    /// released, for logging.
+    pub fn force_release_deadlocked_mutexes(&mut self) -> Vec<(MutexId, ThreadId)> {
+        let mut released = Vec::new();
+        for (&mutex_id, mutex) in self.mutexes.iter_mut() {
+            if mutex.waiting_count > 0 {
+                if let Some((owner, _lock_count)) = mutex.locked.take() {
+                    released.push((mutex_id, owner));
+                }
+            }
+        }
+        released
+    }
 }
 
 impl Environment {

@@ -1166,11 +1166,10 @@ fn app_picker_inner(
     let host_resolutions = crate::window::host_screen_resolutions();
     let quick_options_stuff =
         setup_quick_options(env, delegate, main_view, app_frame, &host_resolutions);
-    let mut quick_options_custom_driver_enabled = false;
-    () = msg![env; (quick_options_stuff.custom_driver_switch)
-        setOn:quick_options_custom_driver_enabled];
-    () = msg![env; (quick_options_stuff.custom_driver_btn)
-        setEnabled:quick_options_custom_driver_enabled];
+    // The on/off switch was removed from the UI; the driver pipeline is
+    // always considered enabled so a selected driver is honoured at launch.
+    let mut quick_options_custom_driver_enabled = true;
+    () = msg![env; (quick_options_stuff.custom_driver_btn) setEnabled:true];
     let mut quick_options_scale_hack: Option<f32> = None;
     let mut quick_options_custom_resolution: Option<(u32, u32)> = None;
     let mut quick_options_fullscreen: Option<()> = None;
@@ -2081,22 +2080,13 @@ fn app_picker_inner(
         } else if let Some(enabled) = std::mem::take(&mut host_obj.low_audio_quality) {
             quick_options_low_audio_quality = enabled;
             () = msg![env; (quick_options_stuff.low_audio_quality_switch) setOn:enabled];
-        } else if let Some(enabled) = std::mem::take(&mut host_obj.custom_driver_enabled) {
-            quick_options_custom_driver_enabled = enabled;
-            () = msg![env; (quick_options_stuff.custom_driver_btn) setEnabled:enabled];
-            if !enabled {
-                () = msg![env; (quick_options_stuff.custom_driver_menu) setHidden:true];
-            }
         } else if let Some(index) = std::mem::take(&mut host_obj.custom_driver_selected) {
             if index < 0 {
                 quick_options_custom_driver = None;
-                quick_options_custom_driver_enabled = false;
-                () = msg![env; (quick_options_stuff.custom_driver_switch) setOn:false];
-                () = msg![env; (quick_options_stuff.custom_driver_btn) setEnabled:false];
+                () = msg![env; (quick_options_stuff.custom_driver_btn) setEnabled:true];
             } else if let Some(path) = quick_options_stuff.custom_driver_paths.get(index as usize) {
                 quick_options_custom_driver = Some(path.clone());
                 quick_options_custom_driver_enabled = true;
-                () = msg![env; (quick_options_stuff.custom_driver_switch) setOn:true];
                 () = msg![env; (quick_options_stuff.custom_driver_btn) setEnabled:true];
             }
             let title = quick_options_custom_driver
@@ -3724,8 +3714,6 @@ fn setup_quick_options(
         RowKind::Label("Metal translator"),
         RowKind::Switch("metalTranslator:", cfg!(target_arch = "aarch64")),
         RowKind::Subsection("GPU / driver"),
-        RowKind::Label("Custom driver"),
-        RowKind::Switch("customDriver:", false),
         RowKind::Label("Custom driver files"),
         RowKind::Buttons(&[("Select ZIP file", "openCustomDriverFolder")]),
         RowKind::Label("Installed custom drivers"),

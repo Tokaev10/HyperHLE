@@ -503,7 +503,10 @@ impl Allocator {
     #[must_use]
     pub fn free(&mut self, base: VAddr) -> GuestUSize {
         let Some(freed) = self.used_chunks.remove_with_base(base) else {
-            log!("Can't free {:#x}, unknown allocation!", base);
+            // Guests sometimes free pointers this allocator never handed out
+            // (mmap-backed reserves, statically-placed data, etc.). Harmless
+            // no-op; keep at debug level so it does not pollute normal logs.
+            log_dbg_once_fmt!("Can't free {:#x}, unknown allocation!", base);
             return 0;
         };
         self.freed_bases.insert(base);

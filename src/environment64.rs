@@ -1044,12 +1044,27 @@ pub fn run(
             log_dbg!("ARM64 unresolved import: {}", symbol);
         }
     }
-    let unresolved_report = unresolved.join("\n");
-    if let Err(error) = std::fs::write(
-        crate::paths::user_data_base_path().join("unresolved_imports.txt"),
-        unresolved_report,
-    ) {
-        log_dbg!("ARM64 could not write unresolved_imports.txt: {}", error);
+    // Per-game unresolved-import report. Append under a game-name heading
+    // instead of overwriting, so launching another title preserves earlier
+    // games' lists (the file previously held only the newest app's symbols).
+    if !unresolved.is_empty() {
+        let game_title = bundle.display_name();
+        let mut report = format!(
+            "\n===== {} ({}) v{} — {} unresolved imports =====\n",
+            game_title,
+            bundle.bundle_identifier(),
+            bundle.bundle_version(),
+            unresolved.len()
+        );
+        for symbol in &unresolved {
+            report.push_str(symbol);
+            report.push('\n');
+        }
+        let report_path = crate::paths::user_data_base_path().join("unresolved_imports.txt");
+        let existing = std::fs::read_to_string(&report_path).unwrap_or_default();
+        if let Err(error) = std::fs::write(&report_path, format!("{}{}", existing, report)) {
+            log_dbg!("ARM64 could not write unresolved_imports.txt: {}", error);
+        }
     }
     crate::arm64_runtime::log_all_runtime_issues(
         unresolved.len() as u32,
