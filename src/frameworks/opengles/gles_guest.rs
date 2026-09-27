@@ -2473,6 +2473,41 @@ fn glTexImage2D(
                 image_size_estimate(width, height, format, type_, alignment.max(1) as GuestUSize);
             mem.ptr_at(pixels.cast::<u8>(), size).cast::<GLvoid>()
         };
+        if gles.is_native_es1() {
+            // TouchHLE parity: a native OpenGL ES 1.1 driver accepts every
+            // guest upload format itself, so the RGBA8 decode / upscaler /
+            // format-normalisation stack below is skipped entirely. Passing
+            // the guest's exact internalformat/format/type through is what
+            // upstream does, and is the only path verified pixel-perfect on
+            // real drivers (e.g. Angry Birds' mixed PVRTC/565/8888 uploads).
+            gles.TexImage2D(
+                target,
+                level,
+                internalformat,
+                width,
+                height,
+                border,
+                format,
+                type_,
+                pixels,
+            );
+            if fix_filter {
+                gles.TexParameteri(target, gles11::TEXTURE_MIN_FILTER, gles11::LINEAR as GLint);
+            }
+            if !fix_filter && level == 0 {
+                if let Some(filter) = configured_min_filter {
+                    gles.TexParameteri(target, gles11::TEXTURE_MIN_FILTER, filter);
+                }
+            }
+            if anisotropic_filtering > 1 {
+                gles.TexParameterf(
+                    target,
+                    gles11::TEXTURE_MAX_ANISOTROPY_EXT,
+                    anisotropic_filtering as GLfloat,
+                );
+            }
+            return;
+        }
         if let Some(decoded) = crate::gles::util::decode_texture_to_rgba8(
             width, height, format, type_, pixels, alignment,
         ) {
@@ -2626,6 +2661,21 @@ fn glTexSubImage2D(
         } else {
             mem.ptr_at(pixels.cast::<u8>(), size).cast::<GLvoid>()
         };
+        if gles.is_native_es1() {
+            // TouchHLE parity: native ES 1.1 passthrough — see glTexImage2D.
+            gles.TexSubImage2D(
+                target,
+                level,
+                xoffset,
+                yoffset,
+                width,
+                height,
+                format,
+                type_,
+                pixels,
+            );
+            return;
+        }
         if let Some(decoded) = crate::gles::util::decode_texture_to_rgba8(
             width, height, format, type_, pixels, alignment,
         ) {
