@@ -151,6 +151,9 @@ pub const O_ACCMODE: OpenFlag = O_RDWR | O_WRONLY | O_RDONLY;
 pub const O_NONBLOCK: OpenFlag = 0x4;
 pub const O_APPEND: OpenFlag = 0x8;
 pub const O_SHLOCK: OpenFlag = 0x10;
+pub const O_FSYNC: OpenFlag = 0x80;
+pub const O_DIRECTORY: OpenFlag = 0x100000;
+pub const O_CLOEXEC: OpenFlag = 0x1000000;
 pub const O_NOFOLLOW: OpenFlag = 0x100;
 pub const O_CREAT: OpenFlag = 0x200;
 pub const O_TRUNC: OpenFlag = 0x400;
@@ -246,6 +249,9 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
         | O_NONBLOCK
         | O_APPEND
         | O_SHLOCK
+        | O_FSYNC
+        | O_DIRECTORY
+        | O_CLOEXEC
         | O_NOFOLLOW
         | O_CREAT
         | O_TRUNC
@@ -443,7 +449,19 @@ pub fn open_direct(env: &mut Environment, path: ConstPtr<u8>, flags: i32) -> Fil
         // parent directories so open(O_CREAT) succeeds.
         if let Some(parent) = actual_path_string.rsplit_once('/').map(|(d, _)| d) {
             if !parent.is_empty() && !env.fs.exists(GuestPath::new(parent)) {
-                _ = env.fs.create_dir_all(GuestPath::new(parent));
+                match env.fs.create_dir_all(GuestPath::new(parent)) {
+                    Ok(()) => log!(
+                        "open(): created missing parent directory \"{}\" for O_CREAT path \"{}\".",
+                        parent,
+                        actual_path_string
+                    ),
+                    Err(err) => log!(
+                        "open(): failed to create missing parent directory \"{}\" for O_CREAT path \"{}\": {:?}.",
+                        parent,
+                        actual_path_string,
+                        err
+                    ),
+                }
             }
         }
     }

@@ -157,7 +157,14 @@ impl BundleData {
 
                 let mut builder = FsNodeBuilder::new();
                 for i in 0..archive_guard.len() {
-                    let file = archive_guard.by_index(i).unwrap(); // TODO: report IO error?
+                    let Ok(mut file) = archive_guard.by_index(i) else {
+                        log!(
+                            "Warning: skipping malformed entry #{} in IPA zip {} (invalid or corrupt local file header).",
+                            i,
+                            bundle_path
+                        );
+                        continue;
+                    };
                     let name = file.name();
                     if let Some(path) = name.strip_prefix(&bundle_path) {
                         let path = GuestPath::new(path);

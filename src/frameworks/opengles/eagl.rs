@@ -784,14 +784,12 @@ pub const CLASSES: ClassExports = objc_classes! {
             maybe_gles.map(|gles| {
                 if gles.is_translator() {
                     "translator-readback"
-                } else if gles.is_native_es1() {
-                    "native-es1-readback"
                 } else {
                     "shader-direct"
                 }
             })
         };
-        if matches!(presentation_mode, Some("translator-readback" | "native-es1-readback")) {
+        if matches!(presentation_mode, Some("translator-readback")) {
             log_once_fmt!(
                 "Layer {:?} uses {}; presenting renderbuffer {:?} through resolved RAM readback to preserve tile contents and alpha.",
                 drawable,
@@ -1275,6 +1273,49 @@ unsafe fn read_renderbuffer(
     gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, old_framebuffer);
     if renderbuffer != current_renderbuffer {
         gles.BindRenderbufferOES(gles11::RENDERBUFFER_OES, current_renderbuffer);
+    }
+    swallow_internal_gl_errors(gles);
+
+    // On tile-based mobile GPUs (Adreno, Mali) a renderbuffer that received
+    // storage via renderbufferStorage:fromDrawable: usually cannot be attached
+    // to an app-created FBO: the attach silently fails and the readback comes
+    // back all-black while the app's real frame sits in the default
+    // framebuffer (the window surface). Dead Space hits exactly this: it
+    // presents with renderbuffer binding 0 and renders into the default
+    // framebuffer. When the explicit-attach readback is all-black, re-read
+    // the default framebuffer at the viewport size instead.
+    if pixel_buffer.iter().any(|&byte| byte != 0) {
+        return (pixel_buffer, width_u32, height_u32);
+    }
+    log_once_fmt!(
+        "[EAGL READBACK] renderbuffer {renderbuffer} read back as all-black \
+         ({width_u32}x{height_u32}); falling back to a default-framebuffer read."
+    );
+    let vp = get_ints::<4>(gles, gles11::VIEWPORT);
+    let (vp_w, vp_h) = (vp[2].max(0) as u32, vp[3].max(0) as u32);
+    if vp_w > 0 && vp_h > 0 {
+        let vp_size = (vp_w as usize)
+            .checked_mul(vp_h as usize)
+            .and_then(|size| size.checked_mul(4))
+            .unwrap_or(0);
+        pixel_buffer.clear();
+        pixel_buffer.reserve_exact(vp_size);
+        gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, 0);
+        gles.PixelStorei(gles11::PACK_ALIGNMENT, 1);
+        gles.Finish();
+        gles.ReadPixels(
+            0,
+            0,
+            vp[2],
+            vp[3],
+            gles11::RGBA,
+            gles11::UNSIGNED_BYTE,
+            pixel_buffer.as_mut_ptr() as *mut _,
+        );
+        gles.PixelStorei(gles11::PACK_ALIGNMENT, old_pack_alignment);
+        pixel_buffer.set_len(vp_size);
+        width_u32 = vp_w;
+        height_u32 = vp_h;
     }
     swallow_internal_gl_errors(gles);
 

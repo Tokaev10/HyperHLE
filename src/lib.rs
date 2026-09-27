@@ -656,6 +656,7 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
                 "guest application terminated unexpectedly".to_string()
             };
             echo!("Guest application stopped: {}", message);
+            crate::log::flush_log_file();
             Err(message)
         }
     }

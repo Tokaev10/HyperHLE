@@ -8,6 +8,7 @@
 use super::gles11_raw as gles11; // constants only
 use super::gles11_raw::types::{GLenum, GLfixed, GLfloat, GLint, GLsizei};
 use super::GLES;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
@@ -327,6 +328,7 @@ pub fn try_decode_pvrtc(
     border: GLint,
     pvrtc_data: &[u8],
 ) -> bool {
+    let mut pvrtc_data: Cow<'_, [u8]> = Cow::Borrowed(pvrtc_data);
     let Some((is_2bit, is_opaque)) = pvrtc_format_properties(internalformat) else {
         return false;
     };
@@ -369,19 +371,26 @@ pub fn try_decode_pvrtc(
         return true;
     };
     if pvrtc_data.len() != expected_size {
+        // Games sometimes upload padded or slightly truncated PVRTC payloads
+        // (off-by-one mip math, trailing-zero padding). Skipping the upload
+        // leaves a permanently black texture. Instead, pad or trim to the
+        // spec size and decode anyway — matching what the driver would have
+        // read from memory.
         log!(
             "Warning: try_decode_pvrtc: PVRTC payload size mismatch for \
              {width}x{height} (level {level}, format {internalformat:#x}, \
              is_2bit={is_2bit}): got {} bytes, expected {expected_size}; \
-             skipping upload.",
+             padding/trimming and decoding anyway.",
             pvrtc_data.len(),
         );
-        return true;
+        let mut padded: Vec<u8> = pvrtc_data.to_vec();
+        padded.resize(expected_size, 0);
+        pvrtc_data = Cow::Owned(padded);
     }
 
     let upload_format = gles11::RGBA;
     let Some(pixels) = cached_pvrtc_pixels(
-        pvrtc_data,
+        pvrtc_data.as_ref(),
         is_2bit,
         width_u,
         height_u,
@@ -437,6 +446,7 @@ pub fn try_decode_pvrtc_sub(
     internalformat: GLenum,
     pvrtc_data: &[u8],
 ) -> bool {
+    let mut pvrtc_data: Cow<'_, [u8]> = Cow::Borrowed(pvrtc_data);
     let Some((is_2bit, is_opaque)) = pvrtc_format_properties(internalformat) else {
         return false;
     };
@@ -467,14 +477,16 @@ pub fn try_decode_pvrtc_sub(
         log_once_fmt!(
             "Warning: try_decode_pvrtc_sub: PVRTC sub-image payload size mismatch \
              ({width}x{height}, level {level}, format {internalformat:#x}): got {} bytes, \
-             expected {expected_size}; skipping upload (repeats suppressed).",
+             expected {expected_size}; padding/trimming and decoding anyway (repeats suppressed).",
             pvrtc_data.len(),
         );
-        return true;
+        let mut padded: Vec<u8> = pvrtc_data.to_vec();
+        padded.resize(expected_size, 0);
+        pvrtc_data = Cow::Owned(padded);
     }
 
     let Some(pixels) = cached_pvrtc_pixels(
-        pvrtc_data,
+        pvrtc_data.as_ref(),
         is_2bit,
         width_u,
         height_u,
