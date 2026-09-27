@@ -96,6 +96,17 @@ pub extern "C" fn SDL_main(
             echo_no_panic!("Panic: {}", payload);
         }
         crate::gles::forensics_state::report_ring_on_crash(payload);
+        // Persist a crash banner to the on-disk log (touchHLE_log.txt) and
+        // flush, so the file always ends with the reason the process died
+        // instead of being cut off by buffered-but-unwritten lines.
+        crate::log::append_log_line("=======================================================");
+        crate::log::append_log_line("=== CRASH: the emulator terminated unexpectedly ===");
+        if let Some(location) = info.location() {
+            crate::log::append_log_line(&format!("At: {} (line {})", location, location.line()));
+        }
+        crate::log::append_log_line(&format!("Reason: {payload}"));
+        crate::log::append_log_line("=======================================================");
+        crate::log::flush_log_file();
     }));
     // Empty args: brings up app picker.
     match main([String::new()].into_iter()) {

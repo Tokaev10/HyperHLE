@@ -23,6 +23,8 @@ fn should_flush_immediately(line: &str) -> bool {
         "GLES ERROR",
         "AudioQueue underrun",
         "audio underrun",
+        "Deadlock",
+        "deadlock",
     ]
     .iter()
     .any(|marker| line.contains(marker))
@@ -54,6 +56,16 @@ pub fn append_log_line(line: &str) {
         let _ = writeln!(log_file, "{line}");
         let count = LOG_LINES.fetch_add(1, Ordering::Relaxed) + 1;
         if count % LOG_FLUSH_INTERVAL == 0 || should_flush_immediately(line) {
+            let _ = log_file.flush();
+        }
+    }
+}
+
+/// Flush the on-disk log file. Call this before the process may die (panic
+/// hook, guest exit) so the log is never truncated by buffered lines.
+pub fn flush_log_file() {
+    if file_logging_enabled() {
+        if let Ok(mut log_file) = get_log_file().lock() {
             let _ = log_file.flush();
         }
     }

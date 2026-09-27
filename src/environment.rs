@@ -2736,7 +2736,10 @@ let default_ipad = DeviceFamily::iPad2;
                 let force_releases =
                     DEADLOCK_FORCE_RELEASES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let released = self.mutex_state.force_release_deadlocked_mutexes();
-                if released.is_empty() || force_releases >= 5 {
+                if released.is_empty() || force_releases >= 24 {
+                    // Give the guest crash handler generous room to finish
+                    // its dump-writing loop (Man of Steel's Breakpad handler
+                    // retries for a while) before giving up.
                     panic!("No active threads, program has deadlocked!");
                 }
                 for (mutex_id, owner) in &released {

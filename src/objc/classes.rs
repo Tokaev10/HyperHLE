@@ -403,6 +403,7 @@ fn substitute_classes(
     // or social network SDKs.
     if !(
         name.starts_with("AdMob")
+        || name.starts_with("AdWhirl")
         || name.starts_with("AltAds")
         || name.starts_with("Mobclix")
         || name.starts_with("FB") // Facebook
@@ -662,6 +663,7 @@ impl ObjC {
         } else {
             // ЗДЕСЬ ДОБАВЛЕНА ЛОГИКА ДЛЯ ДИНАМИЧЕСКИХ КЛАССОВ (GAD и др.)
             let is_fake = name.starts_with("AdMob")
+                || name.starts_with("AdWhirl")
                 || name.starts_with("AltAds")
                 || name.starts_with("Mobclix")
                 || name.starts_with("FB")
