@@ -213,11 +213,7 @@ com.mrgoodliving.TikiTowers: --landscape-left
 # Silent Hill: The Escape
 com.konami-europe.silenthillescape: --x-tilt-offset=-45
 
-# Dead Space
-com.ea.deadspace.bv: --force-composition
-com.ea.deadspace.inc: --force-composition
-com.ea.deadspace.ipad.bv: --force-composition
-com.ea.deadspace.ipad.inc: --force-composition
+# Dead Space (no force-composition: direct EAGL present, matches upstream's non-composited path on Adreno)
 
 # NFS Hot Pursuit
 com.ea.nfshp.bv: --force-composition
