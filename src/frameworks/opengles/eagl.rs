@@ -854,7 +854,9 @@ pub const CLASSES: ClassExports = objc_classes! {
                 env.current_thread,
             );
             match maybe_gles {
-                Some(mut gles) => Some(unsafe { read_renderbuffer(gles.as_mut(), pixels_vec, Some(renderbuffer)) }),
+                Some(mut gles) => Some(unsafe {
+                    read_renderbuffer(gles.as_mut(), pixels_vec, Some(renderbuffer), guest_renders_into_default_fb)
+                }),
                 None => {
                     log!(
                         "[EAGLContext presentRenderbuffer:{:#x}] lost GL \
@@ -911,6 +913,8 @@ unsafe fn present_renderbuffer_readback(
     drawable: id,
     renderbuffer: Option<GLuint>,
 ) {
+    let prefer_default_fb =
+        crate::frameworks::core_animation::guest_owns_default_framebuffer(env);
     let read_result = {
         let maybe_gles = super::sync_context(
             &mut env.framework_state.opengles,
@@ -919,7 +923,12 @@ unsafe fn present_renderbuffer_readback(
             env.current_thread,
         );
         match maybe_gles {
-            Some(mut gles) => Some(read_renderbuffer(gles.as_mut(), Vec::new(), renderbuffer)),
+            Some(mut gles) => Some(read_renderbuffer(
+                gles.as_mut(),
+                Vec::new(),
+                renderbuffer,
+                prefer_default_fb,
+            )),
             None => None,
         }
     };
@@ -1102,6 +1111,7 @@ unsafe fn read_renderbuffer(
     gles: &mut dyn GLES,
     mut pixel_buffer: Vec<u8>,
     override_renderbuffer: Option<GLuint>,
+    prefer_default_fb: bool,
 ) -> (Vec<u8>, u32, u32) {
     // My internal GL calls below (Finish, ReadPixels, framebuffer re-attachment)
     // can raise GL errors on some drivers (e.g. Adreno raising GL_INVALID_VALUE
@@ -1214,6 +1224,38 @@ unsafe fn read_renderbuffer(
         .unwrap_or(0);
     let old_pack_alignment = get_int(gles, gles11::PACK_ALIGNMENT);
 
+    // When the guest renders straight into the default framebuffer (Dead
+    // Space is the canonical case), the drawable renderbuffer never receives
+    // content on tile-based mobile GPUs: an explicit re-attach readback comes
+    // back all-black and forces a second, viewport-sized read. Besides the
+    // wasted readback, sizing the read from the guest's *current viewport*
+    // makes the composited layer rescale every time the app changes viewport
+    // (scene transitions, letterboxing), which presented as constant
+    // jitter/flicker. Read the default framebuffer exactly once, at the
+    // drawable's own constant dimensions instead.
+    if prefer_default_fb && old_framebuffer == 0 && width_u32 > 0 && height_u32 > 0 {
+        pixel_buffer.clear();
+        pixel_buffer.reserve_exact(size);
+        gles.PixelStorei(gles11::PACK_ALIGNMENT, 1);
+        gles.Finish();
+        gles.ReadPixels(
+            0,
+            0,
+            width,
+            height,
+            gles11::RGBA,
+            gles11::UNSIGNED_BYTE,
+            pixel_buffer.as_mut_ptr() as *mut _,
+        );
+        gles.PixelStorei(gles11::PACK_ALIGNMENT, old_pack_alignment);
+        pixel_buffer.set_len(size);
+        swallow_internal_gl_errors(gles);
+        if renderbuffer != current_renderbuffer {
+            gles.BindRenderbufferOES(gles11::RENDERBUFFER_OES, current_renderbuffer);
+        }
+        return (pixel_buffer, width_u32, height_u32);
+    }
+
     // Read straight out of the app's currently-bound framebuffer when one is
     // bound. Rebinding a fresh FBO here (the old approach) unbinds the app's
     // FBO first, which on tile-based mobile GPUs (Mali, Adreno) can discard
@@ -1308,31 +1350,38 @@ unsafe fn read_renderbuffer(
         "[EAGL READBACK] renderbuffer {renderbuffer} read back as all-black \
          ({width_u32}x{height_u32}); falling back to a default-framebuffer read."
     );
-    let vp = get_ints::<4>(gles, gles11::VIEWPORT);
-    let (vp_w, vp_h) = (vp[2].max(0) as u32, vp[3].max(0) as u32);
-    if vp_w > 0 && vp_h > 0 {
-        let vp_size = (vp_w as usize)
-            .checked_mul(vp_h as usize)
+    // Read at the drawable's own dimensions whenever they are known so the
+    // composited layer keeps a constant size frame-to-frame; only fall back
+    // to the viewport when the renderbuffer never received storage at all.
+    let (fb_w, fb_h) = if width_u32 > 0 && height_u32 > 0 {
+        (width, height)
+    } else {
+        let vp = get_ints::<4>(gles, gles11::VIEWPORT);
+        (vp[2].max(0), vp[3].max(0))
+    };
+    if fb_w > 0 && fb_h > 0 {
+        let fb_size = (fb_w as usize)
+            .checked_mul(fb_h as usize)
             .and_then(|size| size.checked_mul(4))
             .unwrap_or(0);
         pixel_buffer.clear();
-        pixel_buffer.reserve_exact(vp_size);
+        pixel_buffer.reserve_exact(fb_size);
         gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, 0);
         gles.PixelStorei(gles11::PACK_ALIGNMENT, 1);
         gles.Finish();
         gles.ReadPixels(
             0,
             0,
-            vp[2],
-            vp[3],
+            fb_w,
+            fb_h,
             gles11::RGBA,
             gles11::UNSIGNED_BYTE,
             pixel_buffer.as_mut_ptr() as *mut _,
         );
         gles.PixelStorei(gles11::PACK_ALIGNMENT, old_pack_alignment);
-        pixel_buffer.set_len(vp_size);
-        width_u32 = vp_w;
-        height_u32 = vp_h;
+        pixel_buffer.set_len(fb_size);
+        width_u32 = fb_w as u32;
+        height_u32 = fb_h as u32;
     }
     swallow_internal_gl_errors(gles);
 

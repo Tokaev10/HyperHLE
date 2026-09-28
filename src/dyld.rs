@@ -1701,11 +1701,19 @@ impl Dyld {
         // the app), install a stub that logs a warning and returns 0. This
         // lets the emulator keep running for relatively harmless symbols like
         // `_getuid`, `_geteuid`, `_getpid`, etc.
-        log!(
-            "Warning: call to unimplemented function {} at {:#x}; installing return-0 stub",
-            symbol,
-            svc_pc
-        );
+        record_unimplemented_api(symbol);
+        {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
+            let n = WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+            if n < 5 || (n + 1).is_power_of_two() {
+                log!(
+                    "Warning: call to unimplemented function {} at {:#x}; installing return-0 stub",
+                    symbol,
+                    svc_pc
+                );
+            }
+        }
         // `linked_host_functions` requires a `&'static str`, so leak the name.
         let leaked_symbol: &'static str = Box::leak(symbol.to_string().into_boxed_str());
         let f: HostFunction = &(unimplemented_function_stub as fn(&mut Environment) -> i32);
@@ -1817,6 +1825,42 @@ fn dyld_stub_binder(_env: &mut Environment, _arg: u32) {
 ///
 /// On ARM32 the return value is placed in `r0`, which matches the C ABI for
 /// `int`/`uid_t`/`pid_t`/pointer return types.
+
+/// Symbols referenced by the guest that no host dylib implements. Each is
+/// bound to a return-0 stub; the summary is echoed once so a single line in
+/// the log lists every missing iOS API for the app being run.
+fn record_unimplemented_api(symbol: &str) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    static SET: Mutex<Option<std::collections::BTreeSet<String>>> = Mutex::new(None);
+    static ECHOED: AtomicUsize = AtomicUsize::new(0);
+    let leaked: &'static str = Box::leak(symbol.to_string().into_boxed_str());
+    let count = {
+        let mut guard = SET.lock().unwrap_or_else(|e| e.into_inner());
+        let set = guard.get_or_insert_with(std::collections::BTreeSet::new);
+        if set.insert(leaked.to_string()) {
+            set.len()
+        } else {
+            0
+        }
+    };
+    if count == 0 {
+        return;
+    }
+    let echoed = ECHOED.fetch_add(1, Ordering::Relaxed);
+    if echoed == 0 || (count % 16) == 0 {
+        let summary = SET.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(set) = summary.as_ref() {
+            let names: Vec<&str> = set.iter().map(|s| s.as_str()).collect();
+            echo!(
+                "Missing iOS APIs used by this app (return-0 stubs, {} total): {}",
+                set.len(),
+                names.join(", ")
+            );
+        }
+    }
+}
+
 fn unimplemented_function_stub(_env: &mut Environment) -> i32 {
     0
 }

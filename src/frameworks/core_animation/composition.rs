@@ -47,6 +47,13 @@ pub(super) struct State {
 /// Marks the guest as a default-framebuffer renderer (see [State]). Sticky
 /// for the rest of the app run: no guest ever expects the compositor to write
 /// the window surface, so leaving it on is always safe.
+pub fn guest_owns_default_framebuffer(env: &Environment) -> bool {
+    env.framework_state
+        .core_animation
+        .composition
+        .guest_owns_default_framebuffer
+}
+
 pub fn set_guest_owns_default_framebuffer(env: &mut Environment, value: bool) {
     env.framework_state.core_animation.composition.guest_owns_default_framebuffer = value;
 }

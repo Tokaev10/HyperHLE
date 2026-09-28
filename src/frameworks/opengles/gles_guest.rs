@@ -2491,6 +2491,9 @@ fn glTexImage2D(
                 type_,
                 pixels,
             );
+            crate::gles::util::record_texture_level_format(
+                gles, target, level, format as u32, type_ as u32,
+            );
             if fix_filter {
                 gles.TexParameteri(target, gles11::TEXTURE_MIN_FILTER, gles11::LINEAR as GLint);
             }
@@ -2534,6 +2537,9 @@ fn glTexImage2D(
                 gles11::UNSIGNED_BYTE,
                 upload_pixels.as_ptr().cast(),
                 upload_pixels.as_ptr().cast(),
+            );
+            crate::gles::util::record_texture_level_format(
+                gles, target, level, gles11::RGBA as u32, gles11::UNSIGNED_BYTE as u32,
             );
             gles.PixelStorei(gles11::UNPACK_ALIGNMENT, alignment);
         } else {
@@ -2676,26 +2682,59 @@ fn glTexSubImage2D(
             );
             return;
         }
-        if let Some(decoded) = crate::gles::util::decode_texture_to_rgba8(
-            width, height, format, type_, pixels, alignment,
-        ) {
-            gles.PixelStorei(gles11::UNPACK_ALIGNMENT, 1);
-            gles.TexSubImage2D(
-                target,
-                level,
-                xoffset,
-                yoffset,
-                width,
-                height,
-                gles11::RGBA,
-                gles11::UNSIGNED_BYTE,
-                decoded.as_ptr().cast(),
-            );
-            gles.PixelStorei(gles11::UNPACK_ALIGNMENT, alignment);
+        // Strict ES 2.0 drivers (Adreno 7xx) raise GL_INVALID_OPERATION when
+        // the sub-image format differs from the format the level was created
+        // with (e.g. an RGBA8-updated sub-rectangle on a 565 or native-format
+        // level). Track the format each level was created with and upload the
+        // sub-image in THAT format. Angry Birds Star Wars (Fusion engine)
+        // asserts on every driver error and aborts, so also drain any error
+        // the reformatting path produces instead of leaking it to the app.
+        let level_format = crate::gles::util::texture_level_format(
+            gles, target, level,
+        );
+        let use_rgba = match level_format {
+            Some((f, t)) => f == gles11::RGBA && t == gles11::UNSIGNED_BYTE,
+            None => false,
+        };
+        if use_rgba {
+            if let Some(decoded) = crate::gles::util::decode_texture_to_rgba8(
+                width, height, format, type_, pixels, alignment,
+            ) {
+                gles.PixelStorei(gles11::UNPACK_ALIGNMENT, 1);
+                gles.TexSubImage2D(
+                    target,
+                    level,
+                    xoffset,
+                    yoffset,
+                    width,
+                    height,
+                    gles11::RGBA,
+                    gles11::UNSIGNED_BYTE,
+                    decoded.as_ptr().cast(),
+                );
+                gles.PixelStorei(gles11::UNPACK_ALIGNMENT, alignment);
+            } else {
+                gles.TexSubImage2D(
+                    target, level, xoffset, yoffset, width, height, format, type_, pixels,
+                );
+            }
         } else {
             gles.TexSubImage2D(
                 target, level, xoffset, yoffset, width, height, format, type_, pixels,
             );
+        }
+        // Keep driver-side INVALID_OPERATION from reaching the app's
+        // glGetError(): its assertion handler aborts the game on sight.
+        let mut drained = 0u32;
+        loop {
+            let e = gles.GetError();
+            if e == 0 {
+                break;
+            }
+            drained += 1;
+            if drained > 8 {
+                break;
+            }
         }
     })
 }

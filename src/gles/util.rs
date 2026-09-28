@@ -911,3 +911,55 @@ impl PalettedTextureFormat {
         }
     }
 }
+
+
+/// Record the host-side format/type a texture level was created with, so
+/// later glTexSubImage2D calls can match it (strict Adreno drivers reject
+/// mismatched sub-image formats with GL_INVALID_OPERATION).
+pub fn record_texture_level_format(
+    gles: &mut dyn crate::gles::GLES,
+    target: u32,
+    level: i32,
+    format: u32,
+    type_: u32,
+) {
+    use std::sync::Mutex;
+    static LEVEL_FORMATS: Mutex<Option<std::collections::HashMap<(u32, u32, i32), (u32, u32)>>> =
+        Mutex::new(None);
+    let texture = unsafe {
+        let mut t: i32 = 0;
+        gles.GetIntegerv(gles11::TEXTURE_BINDING_2D, &mut t);
+        t
+    };
+    if texture <= 0 {
+        return;
+    }
+    let mut guard = LEVEL_FORMATS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() > 4096 {
+        map.clear();
+    }
+    map.insert((texture as u32, target as u32, level as i32), (format, type_));
+}
+
+/// Look up the host-side format/type previously recorded for a texture level.
+pub fn texture_level_format(
+    gles: &mut dyn crate::gles::GLES,
+    target: u32,
+    level: i32,
+) -> Option<(u32, u32)> {
+    use std::sync::Mutex;
+    static LEVEL_FORMATS: Mutex<Option<std::collections::HashMap<(u32, u32, i32), (u32, u32)>>> =
+        Mutex::new(None);
+    let texture = unsafe {
+        let mut t: i32 = 0;
+        gles.GetIntegerv(gles11::TEXTURE_BINDING_2D, &mut t);
+        t
+    };
+    if texture <= 0 {
+        return None;
+    }
+    let guard = LEVEL_FORMATS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.as_ref()?;
+    map.get(&(texture as u32, target as u32, level as i32)).copied()
+}

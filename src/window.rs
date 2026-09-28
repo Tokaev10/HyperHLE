@@ -1156,6 +1156,10 @@ pub fn host_screen_resolutions() -> Vec<(u32, u32)> {
     }
     if let Some(size) = host_screen_size() {
         add_resolution(size);
+        // 0.75x sits between the full device resolution and the half
+        // resolution in the picker (e.g. 1440x3088 -> 1080x2316).
+        let three_quarters = normalize_portrait_size((size.0 * 3 / 4, size.1 * 3 / 4));
+        add_resolution(three_quarters);
         add_resolution((size.0 / 2, size.1 / 2));
     }
     if let Some((width, height)) = resolutions.first().copied() {

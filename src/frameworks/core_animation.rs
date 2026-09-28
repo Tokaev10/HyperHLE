@@ -23,6 +23,7 @@ mod animation;
 mod composition;
 
 pub use composition::recomposite_if_necessary;
+pub use composition::guest_owns_default_framebuffer;
 pub use composition::set_guest_owns_default_framebuffer;
 
 use crate::abi::{impl_GuestRet_for_large_struct, GuestArg};
