@@ -2221,6 +2221,15 @@ unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_tok
         return;
     }
 
+    if gles.is_native_es1()
+        && unsafe { get_int(gles, gles11::FRAMEBUFFER_BINDING_OES) } == 0
+    {
+        log_once!("Native GLES 1.1 presentRenderbuffer has framebuffer 0 bound; swapping the guest-rendered window surface directly instead of presenting the separate drawable renderbuffer.");
+        std::mem::drop(gles_boxed);
+        env.window.as_mut().unwrap().swap_window();
+        return;
+    }
+
     // Frame generation is intentionally NOT served from this path: forcing a
     // glReadPixels every frame costs far more than interpolation saves and
     // makes games lag. The GPU fast path below always runs; interpolation
