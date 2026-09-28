@@ -453,6 +453,8 @@ Other options:
         Enabling this option may solve some rendering issues, but implies
         a performance hit which is undesirable in most of the cases.
 
+        Disable it again with `--disable-force-composition`.
+
     --prefer-gles2-context
         Force EAGL initWithAPI: to create an OpenGL ES 2.0 context even when
         the app requested an OpenGL ES 1.1 context.
@@ -508,7 +510,8 @@ Other options:
         don't sample the texture as opaque black just because no
         mipmaps were uploaded. The guest's own glTexParameteri calls
         still override this. Apps that legitimately upload mipmaps
-        should NOT enable this flag.
+        should NOT enable this flag. Disable it with
+        `--no-fix-texture-min-filter`.
 
     --zero-stack-after-guest-to-host-call=<bytes>
         After a guest-to-host call returns, zero out the given number of

@@ -1197,6 +1197,18 @@ fn app_picker_inner(
     let mut quick_options_shader_compatibility_fixes = true;
     let mut quick_options_fix_texture_min_filter = cfg!(target_os = "android");
     let mut quick_options_force_composition = false;
+    // These two graphics-compatibility toggles persist across launches so
+    // they can be flipped off/on once and stay that way (see
+    // [QUICK_OPTIONS_PERSISTENCE_FILE]). All other quick options reset to
+    // their built-in defaults on every launch.
+    let [persisted_fix_texture_min_filter, persisted_force_composition] =
+        load_persisted_quick_options();
+    if let Some(enabled) = persisted_fix_texture_min_filter {
+        quick_options_fix_texture_min_filter = enabled;
+    }
+    if let Some(enabled) = persisted_force_composition {
+        quick_options_force_composition = enabled;
+    }
     let mut quick_options_angle_driver = false;
     let mut quick_options_log_file = true;
     // Mirror the actual launch default (`Options::default()` enables GL error
@@ -2512,8 +2524,63 @@ fn app_picker_inner(
         }
     }
 
+    save_persisted_quick_options(
+        quick_options_fix_texture_min_filter,
+        quick_options_force_composition,
+    );
+
     // Return the environment so some parts of it can be salvaged.
     (app_path, option_args)
+}
+
+/// File (in the user-data directory) that persists the state of the two
+/// graphics-compatibility quick-option toggles across launches. Each line is
+/// `key=on` or `key=off`; missing lines or unknown values leave the built-in
+/// default in place. Only the toggles a user is likely to flip once and keep
+/// are persisted; everything else intentionally resets per launch.
+const QUICK_OPTIONS_PERSISTENCE_FILE: &str = "touchHLE_quick_options.txt";
+const QUICK_OPTIONS_PERSISTENCE_KEYS: [&str; 2] =
+    ["fix-texture-min-filter", "force-composition"];
+
+fn load_persisted_quick_options() -> [Option<bool>; 2] {
+    let mut values = [None, None];
+    let path = paths::user_data_base_path().join(QUICK_OPTIONS_PERSISTENCE_FILE);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(_) => return values,
+    };
+    for (index, key) in QUICK_OPTIONS_PERSISTENCE_KEYS.iter().enumerate() {
+        for line in contents.lines() {
+            let line = line.split_once('#').map_or(line, |(rest, _)| rest).trim();
+            if let Some((line_key, line_value)) = line.split_once('=') {
+                if line_key.trim() == *key {
+                    values[index] = match line_value.trim() {
+                        "on" | "true" | "1" => Some(true),
+                        "off" | "false" | "0" => Some(false),
+                        _ => None,
+                    };
+                    break;
+                }
+            }
+        }
+    }
+    values
+}
+
+fn save_persisted_quick_options(fix_texture_min_filter: bool, force_composition: bool) {
+    let path = paths::user_data_base_path().join(QUICK_OPTIONS_PERSISTENCE_FILE);
+    let contents = format!(
+        "fix-texture-min-filter={}\nforce-composition={}\n",
+        if fix_texture_min_filter { "on" } else { "off" },
+        if force_composition { "on" } else { "off" },
+    );
+    if let Err(err) = std::fs::write(&path, contents) {
+        log!(
+            "Warning: Could not save quick options to {}: {}",
+            path.display(),
+            err
+        );
+    }
 }
 
 const ICON_SIZE: CGSize = CGSize {
@@ -3707,7 +3774,7 @@ fn setup_quick_options(
         RowKind::GlesOverrideDropdown,
         RowKind::Label("Shader compatibility fixes"),
         RowKind::Switch("shaderCompatibilityFixes:", true),
-        RowKind::Label("Fix incomplete textures"),
+        RowKind::Label("Fix texture mipmap filter"),
         RowKind::Switch("fixTextureMinFilter:", cfg!(target_os = "android")),
         RowKind::Label("Force Core Animation composition"),
         RowKind::Switch("forceComposition:", false),
