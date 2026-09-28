@@ -1710,6 +1710,13 @@ impl Window {
                 }
             }
         }
+        // SDL2 never exposes a magnetometer sensor type, so Core Motion backs
+        // its magnetometer APIs with a synthetic Earth-field model (see
+        // core_motion.rs). BioShock requires a magnetometer in its device
+        // capability checks, so we report presence and synthesize readings.
+        log!(
+            "Magnetometer detected: synthetic 3-axis Earth-field model (no host magnetic sensor)."
+        );
 
         #[cfg(target_os = "macos")]
         let max_height = window.size().1;

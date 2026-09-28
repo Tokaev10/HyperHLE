@@ -3433,9 +3433,12 @@ fn glMapBufferOES(env: &mut Environment, target: GLenum, access: GLenum) -> MutP
             );
             env.mem.free(stale_guest_buffer);
             // Issue a real glUnmapBufferOES so the driver releases its
-            // own mapping of the buffer that we just dropped.
+            // own mapping of the buffer that we just dropped, then drain
+            // any driver error so the intentional double-map never leaks
+            // GL_INVALID_OPERATION into the app's error queue.
             with_ctx_and_mem(env, |gles, _mem| unsafe {
                 gles.UnmapBufferOES(target);
+                while gles.GetError() != 0 {}
             });
             // Re-borrow because with_ctx_and_mem dropped our reference.
             let current_ctx_host_object = env.objc.borrow_mut::<EAGLContextHostObject>(current_ctx);
@@ -3457,7 +3460,7 @@ fn glUnmapBufferOES(env: &mut Environment, target: GLenum) -> GLboolean {
         .opengles
         .current_ctx_for_thread(env.current_thread);
     let Some(current_ctx) = current_ctx else {
-        return gles11::FALSE;
+        return gles11::TRUE;
     };
     let mapping = env
         .objc
@@ -3465,7 +3468,19 @@ fn glUnmapBufferOES(env: &mut Environment, target: GLenum) -> GLboolean {
         .mapped_buffers
         .remove(&buffer_object_name);
     let Some((guest_buffer, host_buffer)) = mapping else {
-        return gles11::FALSE;
+        // Unbalanced unmap (the app unmapped more times than it mapped, or
+        // re-bound a different buffer in between). This is legal input from
+        // these apps' point of view: BioShock unmaps three times after three
+        // maps spanning a re-bind. Host drivers reject the extra unmaps with
+        // GL_INVALID_OPERATION, which then leaks into the app's error queue
+        // via its next glGetError. Unmap best-effort, drain the driver's
+        // error, and report success so the staging-buffer emulation stays
+        // transparent.
+        with_ctx_and_mem(env, |gles, _mem| unsafe {
+            gles.UnmapBufferOES(target);
+            while gles.GetError() != 0 {}
+        });
+        return gles11::TRUE;
     };
     let buffer_size = _get_buffer_size(env, target) as u32;
     unsafe {
@@ -3475,7 +3490,14 @@ fn glUnmapBufferOES(env: &mut Environment, target: GLenum) -> GLboolean {
         );
     }
     env.mem.free(guest_buffer);
-    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.UnmapBufferOES(target) })
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        let result = gles.UnmapBufferOES(target);
+        // Same driver-quirk drain as the unbalanced path above: the extra
+        // unmaps in this staging-buffer emulation are intentional, never a
+        // real app error.
+        while gles.GetError() != 0 {}
+        result
+    })
 }
 
 // =====================================================================

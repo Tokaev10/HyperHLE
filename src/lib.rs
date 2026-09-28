@@ -466,6 +466,34 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
         );
     }
 
+    // Report how each declared capability is honoured, and flip the runtime
+    // switches the capability maps onto (e.g. a game requiring `gyroscope`
+    // expects CoreMotion's isGyroAvailable to answer YES even without a host
+    // sensor — the data path then serves stationary values).
+    if !required_device_capabilities.is_empty() {
+        for capability in &required_device_capabilities {
+            crate::frameworks::core_motion::note_declared_device_capability(capability);
+            let honoured = match *capability {
+                "opengles-1" => Some("OpenGL ES 1.1 backend (default)"),
+                "opengles-2" => Some("OpenGL ES 2.0 backend"),
+                "opengles-3" => Some("OpenGL ES 3.x backend"),
+                "armv6" | "armv7" | "arm64" => Some("native CPU architecture"),
+                "accelerometer" => Some("CoreMotion accelerometer (host SDL sensor or mouse-driven virtual sensor)"),
+                "gyroscope" => Some("CoreMotion gyroscope (host SDL sensor when present, stationary fallback otherwise)"),
+                "magnetometer" => Some("CoreMotion magnetometer (synthetic Earth-field model)"),
+                "location-services" => Some("CoreLocation (reported available)"),
+                "gamekit" => Some("GameKit framework (stubbed online services)"),
+                "microphone" => Some("AudioSession microphone (host audio input where available)"),
+                "opengles-aep" | "metal" | "arkit" => None,
+                _ => None,
+            };
+            match honoured {
+                Some(detail) => echo!("- Required capability '{}': provided ({})", capability, detail),
+                None => echo!("- Required capability '{}': not provided (app must tolerate its absence)", capability),
+            }
+        }
+    }
+
     if just_info {
         return Ok(());
     }

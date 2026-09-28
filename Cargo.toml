@@ -43,6 +43,7 @@ cmake = "0.1.49"
 gl_generator = "0.14.0"
 
 [dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 openh264 = "0.9.8"
 caf = "0.1.0" # ИСПРАВЛЕНИЕ: Добавлен недостающий крейт
 hound = "3.5.0"

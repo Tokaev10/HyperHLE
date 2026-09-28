@@ -3559,6 +3559,20 @@ fn materialize_arm64_data_import(mem: &mut Mem64, symbol: &str) -> Result<Option
         mem.write_u64(address, value).map_err(str::to_owned)?;
         return Ok(Some(address));
     }
+    // C++ function-local `static` guard variables (`__ZGVZ...`) and the
+    // associated static-storage data (`__ZZN...`). The guard must read back
+    // as "initialization complete" (non-zero first byte) or the guest will
+    // try to re-run static initializers through __cxa_guard_acquire; the
+    // data blocks just need stable zeroed storage.
+    if symbol.starts_with("ZGVZ") {
+        let address = cached_import_allocation(mem, symbol, 8, Permissions::read_write())?;
+        mem.write_u64(address, 1).map_err(str::to_owned)?;
+        return Ok(Some(address));
+    }
+    if symbol.starts_with("ZZN") {
+        let address = cached_import_allocation(mem, symbol, 64, Permissions::read_write())?;
+        return Ok(Some(address));
+    }
     if matches!(symbol, "mach_task_self_" | "stdinp" | "stdoutp") {
         let address = cached_import_allocation(mem, symbol, 8, Permissions::read_write())?;
         if symbol == "mach_task_self_" {

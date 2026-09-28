@@ -31,6 +31,31 @@ use crate::objc::{
 };
 use crate::Environment;
 use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Capabilities that the app itself declares in `UIRequiredDeviceCapabilities`.
+/// Games that *require* a sensor expect `isXxxAvailable` to answer YES even
+/// when the host device lacks the physical sensor (BioShock declares
+/// `magnetometer` and fails its device whitelist otherwise). For those
+/// sensors we report availability and back the data with synthesized values.
+static DECLARED_GYROSCOPE_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+/// Record that the running app declared a device capability that maps onto a
+/// Core Motion sensor. Called from the app-launch path after reading
+/// `UIRequiredDeviceCapabilities`.
+pub fn note_declared_device_capability(capability: &str) {
+    match capability {
+        "gyroscope" => DECLARED_GYROSCOPE_REQUIRED.store(true, Ordering::Relaxed),
+        _ => {}
+    }
+}
+
+/// Whether a gyroscope should be reported as available: a real host sensor,
+/// or the app explicitly requires one (in which case `read_sdl_gyroscope`'s
+/// stationary fallback provides the data).
+pub fn gyroscope_required_by_app() -> bool {
+    DECLARED_GYROSCOPE_REQUIRED.load(Ordering::Relaxed)
+}
 
 pub const DYLIB: HostDylib = HostDylib {
     path: "/System/Library/Frameworks/CoreMotion.framework/CoreMotion",
@@ -64,6 +89,34 @@ impl GuestArg for CMAcceleration {
     const REG_COUNT: usize = 6;
     fn from_regs(regs: &[u32]) -> Self {
         CMAcceleration {
+            x: f64::from_regs(&regs[0..2]),
+            y: f64::from_regs(&regs[2..4]),
+            z: f64::from_regs(&regs[4..6]),
+        }
+    }
+    fn to_regs(self, regs: &mut [u32]) {
+        let (x, y, z) = (self.x, self.y, self.z);
+        x.to_regs(&mut regs[0..2]);
+        y.to_regs(&mut regs[2..4]);
+        z.to_regs(&mut regs[4..6]);
+    }
+}
+
+/// Per Apple docs: CMMagneticField is a structure with x, y, z fields
+/// representing the magnetic field in microteslas (uT) along each axis.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C, packed)]
+struct CMMagneticField {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+unsafe impl crate::mem::SafeRead for CMMagneticField {}
+impl_GuestRet_for_large_struct!(CMMagneticField);
+impl GuestArg for CMMagneticField {
+    const REG_COUNT: usize = 6;
+    fn from_regs(regs: &[u32]) -> Self {
+        CMMagneticField {
             x: f64::from_regs(&regs[0..2]),
             y: f64::from_regs(&regs[2..4]),
             z: f64::from_regs(&regs[4..6]),
@@ -112,6 +165,8 @@ struct CMMotionManagerHostObject {
     accelerometer_active: bool,
     gyro_active: bool,
     device_motion_active: bool,
+    magnetometer_update_interval: f64,
+    magnetometer_active: bool,
     /// Cached last accelerometer reading
     last_acceleration: CMAcceleration,
     /// Timestamp of last accelerometer update
@@ -136,6 +191,13 @@ struct CMGyroDataHostObject {
     timestamp: f64,
 }
 impl HostObject for CMGyroDataHostObject {}
+
+#[derive(Default)]
+struct CMMagnetometerDataHostObject {
+    magnetic_field: CMMagneticField,
+    timestamp: f64,
+}
+impl HostObject for CMMagnetometerDataHostObject {}
 
 #[derive(Default)]
 struct CMDeviceMotionHostObject {
@@ -195,6 +257,25 @@ fn read_sdl_gyroscope(env: &Environment) -> Option<CMRotationRate> {
         y: y as f64,
         z: z as f64,
     })
+}
+
+/// Produces a plausible magnetic-field reading in microteslas. SDL2 never
+/// exposes a host magnetometer, so we synthesize a stable Earth-strength field
+/// aligned with the gravity vector: magnitude ~48 uT pointing "north" along
+/// the device's long axis, slightly tilted. Games that use the magnetometer as
+/// a compass see a constant heading; games that only need presence see data.
+fn read_magnetometer(env: &Environment) -> CMMagneticField {
+    let accel = read_sdl_accelerometer(env)
+        .unwrap_or(CMAcceleration { x: 0.0, y: 0.0, z: -1.0 });
+    let norm = (accel.x * accel.x + accel.y * accel.y + accel.z * accel.z).sqrt();
+    if norm < 0.001 {
+        return CMMagneticField { x: 0.0, y: 48.0, z: 0.0 };
+    }
+    CMMagneticField {
+        x: accel.x / norm * 48.0,
+        y: accel.y / norm * 48.0,
+        z: accel.z / norm * 48.0,
+    }
 }
 
 const CLASSES: ClassExports = objc_classes! {
@@ -278,6 +359,42 @@ const CLASSES: ClassExports = objc_classes! {
 }
 - (f64)_rotationRateZ {
     env.objc.borrow::<CMGyroDataHostObject>(this).rotation_rate.z
+}
+
+@end
+
+// =============================================================================
+// CMMagnetometerData
+// Per Apple: Contains a single magnetometer reading (CMMagneticField with
+// x, y, z in microteslas).
+// =============================================================================
+
+@implementation CMMagnetometerData: NSObject
+
++ (id)allocWithZone:(NSZonePtr)_zone {
+    let host_object = Box::new(CMMagnetometerDataHostObject {
+        magnetic_field: CMMagneticField { x: 0.0, y: 0.0, z: 0.0 },
+        timestamp: 0.0,
+    });
+    env.objc.alloc_object(this, host_object, &mut env.mem)
+}
+
+- (CMMagneticField)magneticField {
+    env.objc.borrow::<CMMagnetometerDataHostObject>(this).magnetic_field
+}
+
+- (f64)timestamp {
+    env.objc.borrow::<CMMagnetometerDataHostObject>(this).timestamp
+}
+
+- (f64)_magneticFieldX {
+    env.objc.borrow::<CMMagnetometerDataHostObject>(this).magnetic_field.x
+}
+- (f64)_magneticFieldY {
+    env.objc.borrow::<CMMagnetometerDataHostObject>(this).magnetic_field.y
+}
+- (f64)_magneticFieldZ {
+    env.objc.borrow::<CMMagnetometerDataHostObject>(this).magnetic_field.z
 }
 
 @end
@@ -415,6 +532,8 @@ const CLASSES: ClassExports = objc_classes! {
         accelerometer_active: false,
         gyro_active: false,
         device_motion_active: false,
+        magnetometer_update_interval: 1.0 / 60.0,
+        magnetometer_active: false,
         last_acceleration: CMAcceleration { x: 0.0, y: 0.0, z: -1.0 },
         last_accel_timestamp: 0.0,
         start_time: Some(Instant::now()),
@@ -439,6 +558,7 @@ const CLASSES: ClassExports = objc_classes! {
     env.window
         .as_ref()
         .is_some_and(|window| window.has_gyroscope())
+        || gyroscope_required_by_app()
 }
 
 - (bool)isDeviceMotionAvailable {
@@ -448,7 +568,10 @@ const CLASSES: ClassExports = objc_classes! {
 }
 
 - (bool)isMagnetometerAvailable {
-    false
+    // BioShock's device whitelist checks `magnetometer` among the required
+    // device capabilities, so we report the sensor as present and back it
+    // with a synthesized Earth-field model (see `read_magnetometer`).
+    true
 }
 
 // =========================================================================
@@ -549,7 +672,7 @@ const CLASSES: ClassExports = objc_classes! {
 // as `NO`), so this always returns `NO`. Apple's documentation requires
 // the property be queryable even when the hardware is absent.
 - (bool)isMagnetometerActive {
-    false
+    env.objc.borrow::<CMMotionManagerHostObject>(this).magnetometer_active
 }
 
 // Companion symmetric APIs for the magnetometer-pull-mode API. Apple
@@ -560,18 +683,37 @@ const CLASSES: ClassExports = objc_classes! {
 // guarding magnetometer use behind `isMagnetometerAvailable` continue to
 // run without crashing if they call these unconditionally.
 - (())startMagnetometerUpdates {
+    env.objc.borrow_mut::<CMMotionManagerHostObject>(this).magnetometer_active = true;
 }
 - (())stopMagnetometerUpdates {
+    env.objc.borrow_mut::<CMMotionManagerHostObject>(this).magnetometer_active = false;
 }
 - (())startMagnetometerUpdatesToQueue:(id)_queue withHandler:(id)_handler {
+    env.objc.borrow_mut::<CMMotionManagerHostObject>(this).magnetometer_active = true;
 }
 - (id)magnetometerData {
-    nil
+    let active = env.objc.borrow::<CMMotionManagerHostObject>(this).magnetometer_active;
+    if !active {
+        return nil;
+    }
+    let magnetic_field = read_magnetometer(env);
+    let timestamp = env.objc.borrow::<CMMotionManagerHostObject>(this)
+        .start_time.unwrap_or_else(std::time::Instant::now).elapsed().as_secs_f64();
+
+    let data: id = msg_class![env; CMMagnetometerData new];
+    {
+        let data_host = env.objc.borrow_mut::<CMMagnetometerDataHostObject>(data);
+        data_host.magnetic_field = magnetic_field;
+        data_host.timestamp = timestamp;
+    }
+    autorelease(env, data)
 }
-- (())setMagnetometerUpdateInterval:(f64)_interval {
+- (())setMagnetometerUpdateInterval:(f64)interval {
+    env.objc.borrow_mut::<CMMotionManagerHostObject>(this).magnetometer_update_interval =
+        if interval <= 0.0 { 1.0 / 100.0 } else { interval };
 }
 - (f64)magnetometerUpdateInterval {
-    0.0
+    env.objc.borrow::<CMMotionManagerHostObject>(this).magnetometer_update_interval
 }
 
 // =========================================================================

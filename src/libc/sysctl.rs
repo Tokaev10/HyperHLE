@@ -137,6 +137,21 @@ fn sysctl(
         return 0;
     }
 
+    // CTL_NET/PF_ROUTE route-table probe: games (e.g. BioShock) and Apple's
+    // Reachability-style code call sysctl({CTL_NET, PF_ROUTE, ...}) as
+    // {4, 17} to size the kernel routing table and infer network presence.
+    // Report an empty table with success instead of an unknown-parameter
+    // error (with the default network-disabled environment there are no
+    // routes to report).
+    if name0 == 4 && name1 == 17 {
+        log_dbg!("sysctl([CTL_NET, PF_ROUTE]): returning empty route table");
+        // Report the needed size as zero in both call shapes: with a NULL
+        // buffer (size probe) and with a real buffer (query). A zero length
+        // means "no routes", which the caller treats as success either way.
+        env.mem.write(oldlenp, 0u32);
+        return 0;
+    }
+
     sysctl_generic(
         env,
         |env| {
@@ -168,7 +183,7 @@ fn sysctl(
             let Some((name_str, val)) = INT_MAP.get(&(name0, name1)) else {
                 // Убираем unimplemented!, чтобы избежать паники, просто
                 // логируем и возвращаем ошибку, как в sysctlbyname
-                log!(
+                log_dbg!(
                     "sysctl(): unknown parameter [{}, {}], returning -1",
                     name0,
                     name1
@@ -235,7 +250,7 @@ fn sysctlbyname(
                 _ => {}
             }
             let Some((name_str, val)) = STRING_MAP.get_key_value(name_str) else {
-                log!(
+                log_dbg!(
                     "sysctlbyname(): unknown parameter {}, returning -1",
                     name_str
                 );
