@@ -1492,6 +1492,34 @@ impl Fs {
 
         let path = path.as_ref();
 
+        // Guest apps routinely write into subdirectories they never created
+        // themselves (e.g. Man of Steel's Breakpad handler writes
+        // Documents/Logs/Launch.log without ever creating Documents/Logs/).
+        // When the file doesn't exist and creation was requested,
+        // auto-create the missing parent directory chain so the open
+        // succeeds instead of failing - the old behavior made crash
+        // handlers spin forever retrying the same failed write.
+        if create && self.lookup_node(path).is_none() && self.lookup_parent_node(path).is_none() {
+            if let Some(parent) = path.parent() {
+                if !parent.as_str().is_empty() {
+                    match self.create_dir_all(parent) {
+                        Ok(()) => {
+                            log_dbg!(
+                                "Auto-created missing parent directory {:?} for file creation",
+                                parent
+                            );
+                        }
+                        Err(_) => {
+                            log!(
+                                "Warning: could not auto-create parent directory {:?} for file creation",
+                                parent
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let (parent_node, new_filename) = self.lookup_parent_node(path).ok_or(())?;
         let FsNode::Directory {
             children,

@@ -106,6 +106,7 @@ pub extern "C" fn SDL_main(
         }
         crate::log::append_log_line(&format!("Reason: {payload}"));
         crate::log::append_log_line("=======================================================");
+        crate::dyld::echo_missing_api_summary();
         crate::log::flush_log_file();
     }));
     // Empty args: brings up app picker.
@@ -406,6 +407,7 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
         "- Minimum OS version: {}",
         minimum_os_version.as_deref().unwrap_or("(not specified)")
     );
+    crate::dyld::note_missing_api_min_os_version(minimum_os_version.as_deref());
     echo!(
         "- Required device capabilities: {}",
         if !required_device_capabilities.is_empty() {
@@ -656,6 +658,7 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
                 "guest application terminated unexpectedly".to_string()
             };
             echo!("Guest application stopped: {}", message);
+            crate::dyld::echo_missing_api_summary();
             crate::log::flush_log_file();
             Err(message)
         }

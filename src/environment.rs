@@ -399,25 +399,22 @@ impl Environment {
 let default_ipad = DeviceFamily::iPad2;
 
         let device_family = if let Some(dfo) = device_family_override {
+            // An explicit user override always wins. Previously an override
+            // whose class the bundle didn't declare was silently ignored
+            // (Dead Space HD is an iPad-only bundle, so an iPhone override
+            // was discarded and the user was stuck on iPad2). Warn about the
+            // mismatch, but respect the user's choice.
             let override_is_ipad = dfo.is_ipad();
-            if override_is_ipad && bundle_supports_ipad {
-                dfo
-            } else if !override_is_ipad && bundle_supports_phone {
-                dfo
-            } else {
+            if (override_is_ipad && !bundle_supports_ipad)
+                || (!override_is_ipad && !bundle_supports_phone)
+            {
                 log!(
-                    "Warning: User-defined {:?} device family override is not supported by the app (supported: {:?}); ignoring.",
+                    "Warning: User-defined {:?} device family override does not match the bundle's declared families ({:?}); using it anyway.",
                     dfo,
                     device_family_array
                 );
-                if bundle_supports_phone {
-                    default_phone
-                } else if bundle_supports_ipad {
-                    default_ipad
-                } else {
-                    default_phone
-                }
             }
+            dfo
         } else if bundle_supports_phone {
             // Prefer the phone family when the bundle supports it, matching the
             // previous behaviour for universal (iPhone + iPad) bundles.

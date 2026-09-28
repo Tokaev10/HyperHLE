@@ -71,6 +71,7 @@ public class MainActivity extends SDLActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestMediaPermissions();
+        requestAllFilesAccess();
     }
 
     @Override
@@ -110,6 +111,36 @@ public class MainActivity extends SDLActivity {
             startNativeCapture();
         } else {
             requestPermissions(missing.toArray(new String[0]), MEDIA_PERMISSION_REQUEST);
+        }
+    }
+
+    /**
+     * First-launch "All files access" prompt (Android 11+). The app's own
+     * data directory needs no permission, but importing IPAs from arbitrary
+     * locations (Downloads, SD cards, other app folders) does. MANAGE_
+     * EXTERNAL_STORAGE is an app-op permission: it cannot be granted with a
+     * normal runtime dialog, so we deep-link to the system Settings page for
+     * this app. On Android 10 and below the classic WRITE_EXTERNAL_STORAGE
+     * runtime request in requestMediaPermissions() already covers this.
+     */
+    private void requestAllFilesAccess() {
+        if (Build.VERSION.SDK_INT < 30) return;
+        if (android.os.Environment.isExternalStorageManager()) return;
+        try {
+            Intent intent = new Intent(
+                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception fallbackAttempt) {
+            try {
+                Intent generic = new Intent(
+                        android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                generic.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(generic);
+            } catch (Exception ignored) {
+                Log.w(TAG, "Could not open All Files Access settings page");
+            }
         }
     }
 

@@ -187,10 +187,22 @@ macro_rules! log_sampled {
 /// channels as the `echo!` macro. Helper for code that builds its report as
 /// one `String` first (e.g. the GLES forensics dump), so a report is a single
 /// log event instead of many interleaved ones.
+/// SDL's log functions require valid C strings: any interior NUL byte makes
+/// them panic (and thus kills the whole emulator). Guest-influenced content
+/// (driver strings, forensics dumps, app-supplied text) can contain NULs, so
+/// every message passing through SDL logging must be sanitized.
+pub fn sanitize_for_sdl(msg: &str) -> String {
+    if msg.as_bytes().contains(&0) {
+        msg.replace('\0', "\\0")
+    } else {
+        msg.to_owned()
+    }
+}
+
 pub fn echo_preformatted(msg: &str) {
     #[cfg(target_os = "android")]
     {
-        sdl2::log::log(msg);
+        sdl2::log::log(&sanitize_for_sdl(msg));
     }
     #[cfg(not(target_os = "android"))]
     eprintln!("{}", msg);
@@ -211,7 +223,7 @@ macro_rules! echo {
 
             #[cfg(target_os = "android")]
             {
-                sdl2::log::log(&formatted_str);
+                sdl2::log::log(&sanitize_for_sdl(&formatted_str));
             }
             #[cfg(not(target_os = "android"))]
             eprintln!("{}", formatted_str);

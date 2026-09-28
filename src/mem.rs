@@ -303,7 +303,15 @@ type Bytes = [u8; 1 << 32];
 pub const PAGE_SIZE: GuestUSize = 4096;
 pub const PAGE_SIZE_ALIGN_MASK: GuestUSize = 0xfff;
 const MAX_DEFENSIVE_GUEST_ACCESS: GuestUSize = 64 * 1024 * 1024;
-const MAX_DEFENSIVE_GUEST_ALLOCATION: GuestUSize = 512 * 1024 * 1024;
+// Raised from 512 MiB to 1 GiB: guest memory is mmap-backed and lazily
+// committed, so large-but-sane requests (Man of Steel asks for 0x21c10000,
+// about 540 MiB, up front) no longer need to be refused. Refusing them made
+// the guest proceed with a NULL pointer and crash inside its own handler.
+const MAX_DEFENSIVE_GUEST_ALLOCATION: GuestUSize = 1024 * 1024 * 1024;
+/// Allocations above this size skip the eager zero-fill in `alloc`. Anonymous
+/// mmap memory is already zero on first touch, and filling hundreds of MiB up
+/// front would commit physical RAM the guest may never write to.
+const EAGER_ZERO_FILL_LIMIT: GuestUSize = 128 * 1024 * 1024;
 pub(crate) const ALIGNED_ALLOCATION_MAGIC: u32 = 0xA11C_0CA7;
 
 /// The type that owns the guest memory and provides accessors for it.
@@ -938,7 +946,7 @@ impl Mem {
         }
 
         let ptr = Ptr::from_bits(self.allocator.alloc(size));
-        if !ptr.is_null() && !self.zero_memory_on_free {
+        if !ptr.is_null() && !self.zero_memory_on_free && size <= EAGER_ZERO_FILL_LIMIT {
             self.bytes_at_mut(ptr.cast(), size).fill(0);
         }
 

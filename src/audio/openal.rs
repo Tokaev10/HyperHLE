@@ -71,23 +71,12 @@ impl OpenALManager {
 }
 
 fn ensure_openal_backend_available() {
-    // Keep the Android mixer on its own host thread, but use a short mixer
-    // block. The old 2048-sample default compounded with the guest queue lead
-    // and made music start noticeably late. Explicit ALSOFT_* settings still
-    // win, so advanced users can raise the block size for a problematic device.
-    if cfg!(target_os = "android") {
-        unsafe {
-            if std::env::var_os("ALSOFT_MIXER_THREADS").is_none() {
-                std::env::set_var("ALSOFT_MIXER_THREADS", "1");
-            }
-            if std::env::var_os("ALSOFT_UPDATE_SIZE").is_none() {
-                std::env::set_var("ALSOFT_UPDATE_SIZE", "256");
-            }
-            if std::env::var_os("ALSOFT_BUFFER_SIZE").is_none() {
-                std::env::set_var("ALSOFT_BUFFER_SIZE", "1024");
-            }
-        }
-    }
+    // No Android-specific ALSOFT_* overrides: upstream touchHLE relies on
+    // OpenAL Soft's own defaults, and its audio is measurably smoother than
+    // the short 256-sample mixer block this fork used to force (which caused
+    // frequent underruns under guest CPU load). Users can still tune latency
+    // themselves via ALSOFT_UPDATE_SIZE / ALSOFT_BUFFER_SIZE /
+    // ALSOFT_MIXER_THREADS; explicit settings always win.
 
     // Respect any user-provided override.
     if std::env::var_os("ALSOFT_DRIVERS").is_some() {

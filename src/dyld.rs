@@ -1827,38 +1827,75 @@ fn dyld_stub_binder(_env: &mut Environment, _arg: u32) {
 /// `int`/`uid_t`/`pid_t`/pointer return types.
 
 /// Symbols referenced by the guest that no host dylib implements. Each is
-/// bound to a return-0 stub; the summary is echoed once so a single line in
-/// the log lists every missing iOS API for the app being run.
+/// bound to a return-0 stub; the summary is echoed so a single line in the
+/// log lists every missing iOS API for the app being run, tagged with the
+/// app's minimum iOS version.
+static MISSING_API_SET: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> =
+    std::sync::Mutex::new(None);
+static MISSING_API_MIN_OS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static MISSING_API_LAST_ECHO_LEN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn record_unimplemented_api(symbol: &str) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
-    static SET: Mutex<Option<std::collections::BTreeSet<String>>> = Mutex::new(None);
-    static ECHOED: AtomicUsize = AtomicUsize::new(0);
-    let leaked: &'static str = Box::leak(symbol.to_string().into_boxed_str());
-    let count = {
-        let mut guard = SET.lock().unwrap_or_else(|e| e.into_inner());
+    use std::sync::atomic::Ordering;
+    let inserted = {
+        let mut guard = MISSING_API_SET.lock().unwrap_or_else(|e| e.into_inner());
         let set = guard.get_or_insert_with(std::collections::BTreeSet::new);
-        if set.insert(leaked.to_string()) {
-            set.len()
-        } else {
-            0
-        }
+        set.insert(symbol.to_string())
     };
-    if count == 0 {
+    if !inserted {
         return;
     }
+    let count = MISSING_API_SET
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|s| s.len())
+        .unwrap_or(0);
+    // Echo early and every so often; the crash/exit hooks re-echo the final list.
+    static ECHOED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let echoed = ECHOED.fetch_add(1, Ordering::Relaxed);
     if echoed == 0 || (count % 16) == 0 {
-        let summary = SET.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(set) = summary.as_ref() {
-            let names: Vec<&str> = set.iter().map(|s| s.as_str()).collect();
-            echo!(
-                "Missing iOS APIs used by this app (return-0 stubs, {} total): {}",
-                set.len(),
-                names.join(", ")
-            );
-        }
+        echo_missing_api_summary();
     }
+}
+
+/// Remember the app's minimum OS version so the missing-API summary can say
+/// which iOS release's API surface the app expects.
+pub fn note_missing_api_min_os_version(version: Option<&str>) {
+    let mut guard = MISSING_API_MIN_OS.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = version.map(|v| v.to_string());
+    }
+}
+
+/// Echo the missing-API summary. Safe to call repeatedly (crash hook, exit
+/// path): each echo is skipped unless the set grew since the last echo, so
+/// crash logs always carry the freshest full list without spamming.
+pub fn echo_missing_api_summary() {
+    use std::sync::atomic::Ordering;
+    let guard = MISSING_API_SET.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(set) = guard.as_ref() else { return };
+    if set.is_empty() {
+        return;
+    }
+    let last = MISSING_API_LAST_ECHO_LEN.load(Ordering::Relaxed);
+    if set.len() == last {
+        return;
+    }
+    MISSING_API_LAST_ECHO_LEN.store(set.len(), Ordering::Relaxed);
+    let min_os = MISSING_API_MIN_OS.lock().unwrap_or_else(|e| e.into_inner());
+    let os_tag = match min_os.as_deref() {
+        Some(v) => format!(" for iOS {}", v),
+        None => String::new(),
+    };
+    let names: Vec<&str> = set.iter().map(|s| s.as_str()).collect();
+    echo!(
+        "Unimplemented iOS{} APIs used by this app (return-0 stubs, {} total): {}",
+        os_tag,
+        set.len(),
+        names.join(", ")
+    );
 }
 
 fn unimplemented_function_stub(_env: &mut Environment) -> i32 {
