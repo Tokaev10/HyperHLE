@@ -223,7 +223,7 @@ macro_rules! echo {
 
             #[cfg(target_os = "android")]
             {
-                sdl2::log::log(&sanitize_for_sdl(&formatted_str));
+                sdl2::log::log(&$crate::log::sanitize_for_sdl(&formatted_str));
             }
             #[cfg(not(target_os = "android"))]
             eprintln!("{}", formatted_str);
