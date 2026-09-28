@@ -56,23 +56,25 @@ struct GuestInterface {
     broadcast: Option<[u8; 4]>,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 /// The "broadcast/destination address" slot is named `ifa_dstaddr` on
 /// BSD/macOS but is part of the `ifa_ifu` union-flattened field on Linux's
 /// `struct ifaddrs`. This helper papers over the difference.
 unsafe fn ifa_broad_addr(ia: &libc::ifaddrs) -> *const libc::sockaddr {
-    #[cfg(target_os = "linux")]
+    // Linux and Android both flatten the BSD ifa_dstaddr/ifa_broadaddr union
+    // into a plain `ifa_ifu` pointer in the libc crate.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         ia.ifa_ifu
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         ia.ifa_dstaddr
     }
 }
 
 /// Enumerate the host's IPv4 interfaces.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 fn host_ipv4_interfaces() -> Option<Vec<GuestInterface>> {
     let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut ifap) } != 0 || ifap.is_null() {
@@ -134,7 +136,7 @@ fn host_ipv4_interfaces() -> Option<Vec<GuestInterface>> {
 /// Fallback host enumeration for platforms without `getifaddrs` in `libc`:
 /// a UDP route probe (no packets are sent; `connect` on UDP only selects the
 /// source address the kernel would use for the default route).
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_os = "android"))]
 fn host_ipv4_interfaces() -> Option<Vec<GuestInterface>> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("8.8.8.8:53").ok()?;

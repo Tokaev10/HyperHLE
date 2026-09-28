@@ -12,6 +12,7 @@ use crate::libc::posix_io::stat::uid_t;
 use crate::libc::posix_io::{FileDescriptor, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
 use crate::mem::{ConstPtr, MutPtr, SafeRead};
 use crate::Environment;
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
 const MFSTYPENAMELEN: usize = 16;
@@ -46,6 +47,10 @@ pub struct statfs {
 }
 unsafe impl SafeRead for statfs {}
 
+/// Host free/total bytes. Unix reads statvfs; Windows (where the emulated
+/// volume is just a folder on the app data drive) falls back to the
+/// iOS baseline constants rather than shelling out to Win32.
+#[cfg(unix)]
 fn real_free_bytes() -> Option<(u64, u64)> {
     let mut vfs = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     let base = crate::paths::user_data_base_path();
@@ -55,6 +60,11 @@ fn real_free_bytes() -> Option<(u64, u64)> {
     }
     let vfs = unsafe { vfs.assume_init() };
     Some((vfs.f_bavail as u64 * vfs.f_bsize as u64, vfs.f_frsize as u64 * vfs.f_blocks as u64))
+}
+
+#[cfg(not(unix))]
+fn real_free_bytes() -> Option<(u64, u64)> {
+    None
 }
 
 /// A plausible `statfs` for the (single, fake) filesystem we present to apps.
