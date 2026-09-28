@@ -164,7 +164,7 @@ fn socket(env: &mut Environment, domain: i32, type_: i32, protocol: i32) -> File
     // TODO: handle errno properly
     set_errno(env, 0);
 
-    if !env.options.network_access {
+    if !env.ensure_network_access("socket()") {
         log_dbg!(
             "Network access is disabled, socket({}, {}, {}) => -1",
             domain,

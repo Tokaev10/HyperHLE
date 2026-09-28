@@ -42,7 +42,7 @@ fn CFReadStreamCreateForHTTPRequest(
     _allocator: u32,
     request: CFHTTPMessageRef,
 ) -> CFReadStreamRef {
-    if !env.options.network_access {
+    if !env.ensure_network_access("CFReadStreamCreateForHTTPRequest") {
         log!("CFReadStreamCreateForHTTPRequest: network access is disabled");
         return nil;
     }

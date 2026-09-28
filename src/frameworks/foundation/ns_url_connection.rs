@@ -66,7 +66,7 @@ pub(crate) fn perform_request(
     if request == nil {
         return Err("request is nil".to_string());
     }
-    if !env.options.network_access {
+    if !env.ensure_network_access("NSURLConnection") {
         return Err("network access is disabled".to_string());
     }
 

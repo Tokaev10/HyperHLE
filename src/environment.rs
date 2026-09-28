@@ -21,7 +21,7 @@ use crate::{
     abi, bundle, cpu, dyld, frameworks, fs, gdb, image, libc, mach_o, mem, msg_class, objc,
     options, stack, window,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::TcpListener;
 use std::rc::Rc;
@@ -307,6 +307,21 @@ static ENVIRONMENT_INSTANCE_EXISTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 impl Environment {
+    /// Ensures network access is enabled, auto-enabling it the first time a
+    /// guest API actually asks for the network even when the user left it
+    /// disabled by default. Returns whether network access is (now) enabled.
+    pub fn ensure_network_access(&mut self, caller: &str) -> bool {
+        if self.options.network_access {
+            return true;
+        }
+        self.options.network_access = true;
+        log!(
+            "Network access: auto-enabled on request from {} (was disabled by settings)",
+            caller
+        );
+        true
+    }
+
     /// Loads the binary and sets up the emulator.
     pub fn new(
         bundle: bundle::Bundle,
@@ -2345,6 +2360,36 @@ let default_ipad = DeviceFamily::iPad2;
                             }
                             ThreadNextAction::Continue
                         } else {
+                            // Resuming at `svc_pc` re-executes the SVC. For a
+                            // freshly-linked stub that is intentional (the
+                            // stub now contains real code), but if the same
+                            // PC keeps coming back it means the guest is
+                            // executing corrupt/stale code (Terraria 1.0:
+                            // 6.7M identical warnings, 694 MB log). Detect
+                            // the loop and terminate the guest thread.
+                            thread_local! {
+                                static RESUME_COUNT: RefCell<HashMap<u32, u32>> =
+                                    RefCell::new(HashMap::new());
+                            }
+                            let spins = RESUME_COUNT.with(|c| {
+                                let mut map = c.borrow_mut();
+                                let n = map.entry(svc_pc).or_insert(0);
+                                *n += 1;
+                                let result = *n;
+                                if result > 8 {
+                                    // Reset so a legitimately re-linked stub
+                                    // gets a fresh budget if we ever return.
+                                    map.remove(&svc_pc);
+                                }
+                                result
+                            });
+                            if spins > 8 {
+                                log_no_panic!(
+                                    "Guest thread {} is stuck re-executing unhandled SVC #{} at {:#x} (no handler, not a linkable stub); terminating the thread to prevent an infinite loop.",
+                                    self.current_thread, svc, svc_pc
+                                );
+                                return ThreadNextAction::ReturnToHost;
+                            }
                             self.cpu.regs_mut()[cpu::Cpu::PC] = svc_pc;
                             ThreadNextAction::Continue
                         }

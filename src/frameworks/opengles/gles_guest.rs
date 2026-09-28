@@ -16,6 +16,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::slice::from_raw_parts;
+use std::time::{Duration, Instant};
 use touchHLE_gl_bindings::gles11::{
     ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER, ELEMENT_ARRAY_BUFFER_BINDING, WRITE_ONLY_OES,
 };
@@ -745,14 +746,38 @@ fn log_game_rect(
         static LAST: RefCell<HashMap<&'static str, (GLint, GLint, GLsizei, GLsizei)>> =
             RefCell::new(HashMap::new());
     }
-    let Some(label_static) = LAST.with(|last| {
+    // Some games alternate between two different rects every frame (BioShock
+    // toggles 512x512 <-> 480x320), which defeats plain change detection.
+    // Additionally rate-limit each label to at most one line per second.
+    thread_local! {
+        static LAST_LOG: RefCell<HashMap<&'static str, Instant>> =
+            RefCell::new(HashMap::new());
+    }
+    let now = Instant::now();
+    let changed = LAST.with(|last| {
         let mut last = last.borrow_mut();
         let changed = last.get(label) != Some(&(x, y, width, height));
         last.insert(intern_rect_label(label), (x, y, width, height));
-        changed.then(|| intern_rect_label(label))
-    }) else {
+        changed
+    });
+    if !changed {
         return;
-    };
+    }
+    let allowed = LAST_LOG.with(|times| {
+        let mut times = times.borrow_mut();
+        let allowed = times
+            .get(label)
+            .map(|t| now.duration_since(*t) >= Duration::from_secs(1))
+            .unwrap_or(true);
+        if allowed {
+            times.insert(intern_rect_label(label), now);
+        }
+        allowed
+    });
+    if !allowed {
+        return;
+    }
+    let label_static = intern_rect_label(label);
     if crate::gles::translator_tracing_enabled() {
         log!(
             "[{} GAME SPACE] bundle={} requested=({}, {}, {}, {}) submitted=({}, {}, {}, {}) scale_hack={} drawable conversion is deferred to final presentation (logged on change only)",

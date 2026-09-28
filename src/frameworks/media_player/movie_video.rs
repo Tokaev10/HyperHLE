@@ -219,11 +219,19 @@ fn run_native_decode(
     stop: Arc<AtomicBool>,
 ) {
     use openh264::decoder::Decoder;
+    use openh264::formats::YUVSource;
 
     let width = track.width;
     let height = track.height;
+    // Presentation buffer is always sized to the container's declared
+    // dimensions (the compositor uploads with those). The decoder's actual
+    // output can differ - H.264 pictures are macroblock-aligned, so e.g. a
+    // 1279x720 track decodes to a 1280x720 picture - so the staging buffer is
+    // sized to the decoder's dimensions on first use and cropped back down
+    // during the flip. openh264's write_rgba8 asserts an exact-size buffer,
+    // which previously panicked the whole emulator (BioShock intro video).
     let frame_len = (width as usize) * (height as usize) * 4;
-    let mut rgba = vec![0u8; frame_len];
+    let mut rgba: Vec<u8> = Vec::new();
     let mut flipped = vec![0u8; frame_len];
     let stride = width as usize * 4;
 
@@ -283,12 +291,20 @@ fn run_native_decode(
             }
             match decoder.decode(&annexb) {
                 Ok(Some(yuv)) => {
+                    let (dec_w, dec_h) = yuv.dimensions();
+                    let (dec_w, dec_h) = (dec_w as usize, dec_h as usize);
+                    if rgba.len() != dec_w * dec_h * 4 {
+                        rgba = vec![0u8; dec_w * dec_h * 4];
+                    }
                     yuv.write_rgba8(&mut rgba);
-                    // Flip vertically for the compositor's bottom-first rows.
-                    for row in 0..height as usize {
-                        let src = (height as usize - 1 - row) * stride;
+                    // Flip vertically for the compositor's bottom-first rows,
+                    // cropping/padding to the track's declared size.
+                    let copy_w = dec_w.min(width as usize) * 4;
+                    let rows = dec_h.min(height as usize);
+                    for row in 0..rows {
+                        let src = (dec_h - 1 - row) * dec_w * 4;
                         let dst = row * stride;
-                        flipped[dst..dst + stride].copy_from_slice(&rgba[src..src + stride]);
+                        flipped[dst..dst + copy_w].copy_from_slice(&rgba[src..src + copy_w]);
                     }
                     *sink.lock().unwrap() = Some(flipped.clone());
                 }

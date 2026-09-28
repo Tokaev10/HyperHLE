@@ -563,6 +563,7 @@ pub const CLASSES: ClassExports = objc_classes! {
         .state = NS_URL_SESSION_TASK_STATE_RUNNING;
 
     let request = task_request(env, this);
+    let _ = env.ensure_network_access("NSURLSession");
     let result = if env.options.network_access {
         match perform_request(env, request) {
             Ok(result) => Ok(result),

@@ -1518,10 +1518,27 @@ impl Dyld {
                         as usize,
                 );
                 let Some(&(symbol, f)) = f else {
-                    log!(
-                        "Warning: Unexpected SVC #{} at {:#x}; treating as no-op (returning to caller).",
-                        svc, svc_pc
-                    );
+                    // Rate-limit: first few hits, then every 4096th. This
+                    // path used to log unbounded and re-execute the same SVC
+                    // forever (6.7M lines on Terraria 1.0).
+                    {
+                        use std::sync::atomic::{AtomicUsize, Ordering};
+                        static WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
+                        let n = WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                        if n < 3 || n % 4096 == 0 {
+                            log!(
+                                "Warning: Unexpected SVC #{} at {:#x}; linked-function slot is empty (stub was never allocated, or guest state is corrupt). Self-healing into a return-0 stub.",
+                                svc, svc_pc
+                            );
+                        }
+                    }
+                    // Self-heal: if this PC lies inside a symbol-stub section,
+                    // install a real return-0 stub (same shape as the
+                    // do_lazy_link fallback) so execution can actually
+                    // proceed instead of re-executing the same SVC forever.
+                    if let Some(paired) = self.install_unimplemented_stub(bins, mem, cpu, svc_pc) {
+                        return Some(paired);
+                    }
                     return None;
                 };
                 log_sampled!(1024, "Call to host function, already linked: {}", symbol);
@@ -1534,6 +1551,65 @@ impl Dyld {
         }
     }
 
+    /// Links by restoring the original stub function, then updating
+    /// `__la_symbol_ptr` to the appropriate function.
+    pub(crate) fn link_by_restoring_stub(
+        mem: &mut Mem,
+        cpu: &mut Cpu,
+        linked_function: u32,
+        svc_pc: u32,
+        entry_size: u32,
+        pic_offset: u32,
+    ) -> (MutPtr<u32>, MutPtr<u32>) {
+        let original_instructions: &[u32] = match entry_size {
+            4 => Dyld::SYMBOL_STUB1_INSTRUCTIONS.as_slice(),
+            12 => Dyld::SYMBOL_STUB_INSTRUCTIONS.as_slice(),
+            16 => Dyld::PIC_SYMBOL_STUB_INSTRUCTIONS.as_slice(),
+            other => {
+                // setup_lazy_linking already filters out unsupported
+                // sizes; if we reach here something is badly out of
+                // sync. Treat as a 12-byte normal stub to keep things
+                // moving rather than aborting the host.
+                log!(
+                    "Warning: link_by_restoring_stub: unsupported entry size {}; falling back to 12-byte stub.",
+                    other
+                );
+                Dyld::SYMBOL_STUB_INSTRUCTIONS.as_slice()
+            }
+        };
+        let instruction_count: GuestUSize = original_instructions.len().try_into().unwrap();
+
+        // Restore the original stub, which calls the __la_symbol_ptr
+        let stub_function_ptr: MutPtr<u32> = Ptr::from_bits(svc_pc);
+        if entry_size == 4 {
+            mem.write(stub_function_ptr, original_instructions[0] | pic_offset)
+        } else {
+            for (i, &instr) in original_instructions.iter().enumerate() {
+                mem.write(stub_function_ptr + i.try_into().unwrap(), instr)
+            }
+        }
+
+        cpu.invalidate_cache_range(stub_function_ptr.to_bits(), instruction_count * 4);
+        // Update the __la_symbol_ptr
+        let la_symbol_ptr: MutPtr<u32> = if entry_size == 12 {
+            // Normal stub: absolute address
+            let addr = mem.read(stub_function_ptr + instruction_count);
+            Ptr::from_bits(addr)
+        } else {
+            // The PIC (position-independent code) stub uses a
+            // PC-relative offset rather than an absolute address.
+            if entry_size == 4 {
+                let offset = mem.read(stub_function_ptr) & 0xFFF;
+                Ptr::from_bits(stub_function_ptr.to_bits() + offset + 8)
+            } else {
+                let offset = mem.read(stub_function_ptr + instruction_count);
+                Ptr::from_bits(stub_function_ptr.to_bits() + offset + 12)
+            }
+        };
+        mem.write(la_symbol_ptr, linked_function);
+        (stub_function_ptr, la_symbol_ptr)
+    }
+
     fn do_lazy_link(
         &mut self,
         bins: &[MachO],
@@ -1541,65 +1617,6 @@ impl Dyld {
         cpu: &mut Cpu,
         svc_pc: u32,
     ) -> Option<(String, HostFunction)> {
-        // Links by restoring the original stub function, then updating
-        // __la_symbol_ptr to the appropriate function.
-        fn link_by_restoring_stub(
-            mem: &mut Mem,
-            cpu: &mut Cpu,
-            linked_function: u32,
-            svc_pc: u32,
-            entry_size: u32,
-            pic_offset: u32,
-        ) -> (MutPtr<u32>, MutPtr<u32>) {
-            let original_instructions: &[u32] = match entry_size {
-                4 => Dyld::SYMBOL_STUB1_INSTRUCTIONS.as_slice(),
-                12 => Dyld::SYMBOL_STUB_INSTRUCTIONS.as_slice(),
-                16 => Dyld::PIC_SYMBOL_STUB_INSTRUCTIONS.as_slice(),
-                other => {
-                    // setup_lazy_linking already filters out unsupported
-                    // sizes; if we reach here something is badly out of
-                    // sync. Treat as a 12-byte normal stub to keep things
-                    // moving rather than aborting the host.
-                    log!(
-                        "Warning: link_by_restoring_stub: unsupported entry size {}; falling back to 12-byte stub.",
-                        other
-                    );
-                    Dyld::SYMBOL_STUB_INSTRUCTIONS.as_slice()
-                }
-            };
-            let instruction_count: GuestUSize = original_instructions.len().try_into().unwrap();
-
-            // Restore the original stub, which calls the __la_symbol_ptr
-            let stub_function_ptr: MutPtr<u32> = Ptr::from_bits(svc_pc);
-            if entry_size == 4 {
-                mem.write(stub_function_ptr, original_instructions[0] | pic_offset)
-            } else {
-                for (i, &instr) in original_instructions.iter().enumerate() {
-                    mem.write(stub_function_ptr + i.try_into().unwrap(), instr)
-                }
-            }
-
-            cpu.invalidate_cache_range(stub_function_ptr.to_bits(), instruction_count * 4);
-            // Update the __la_symbol_ptr
-            let la_symbol_ptr: MutPtr<u32> = if entry_size == 12 {
-                // Normal stub: absolute address
-                let addr = mem.read(stub_function_ptr + instruction_count);
-                Ptr::from_bits(addr)
-            } else {
-                // The PIC (position-independent code) stub uses a
-                // PC-relative offset rather than an absolute address.
-                if entry_size == 4 {
-                    let offset = mem.read(stub_function_ptr) & 0xFFF;
-                    Ptr::from_bits(stub_function_ptr.to_bits() + offset + 8)
-                } else {
-                    let offset = mem.read(stub_function_ptr + instruction_count);
-                    Ptr::from_bits(stub_function_ptr.to_bits() + offset + 12)
-                }
-            };
-            mem.write(la_symbol_ptr, linked_function);
-            (stub_function_ptr, la_symbol_ptr)
-        }
-
         let (stubs, pic_offset) = bins
             .iter()
             .find_map(|bin| {
@@ -1623,7 +1640,7 @@ impl Dyld {
         if let Some(&addr) = self.non_lazy_host_functions.get(symbol) {
             // The host function was already linked non-lazily, point the
             // stub and __la_symbol_ptr to the function.
-            let (stub_function_ptr, la_symbol_ptr) = link_by_restoring_stub(
+            let (stub_function_ptr, la_symbol_ptr) = Self::link_by_restoring_stub(
                 mem,
                 cpu,
                 addr.addr_with_thumb_bit(),
@@ -1654,7 +1671,7 @@ impl Dyld {
         for dylib in bins.iter() {
             if let Some(&addr) = dylib.exported_symbols.get(symbol) {
                 let (stub_function_ptr, la_symbol_ptr) =
-                    link_by_restoring_stub(mem, cpu, addr, svc_pc, info.entry_size, pic_offset);
+                    Self::link_by_restoring_stub(mem, cpu, addr, svc_pc, info.entry_size, pic_offset);
                 log_dbg!(
                     "Linked {} at {:?}/{:?} to {:#x} from {}",
                     symbol,
@@ -1734,6 +1751,100 @@ impl Dyld {
         }
         cpu.invalidate_cache_range(stub_function_ptr.to_bits(), 4);
         Some((leaked_symbol.to_owned(), f))
+    }
+
+    /// Self-healing for an SVC that points at an empty linked-function slot:
+    /// if `svc_pc` is inside a symbol-stub section, resolve the stub's real
+    /// symbol (from the dyld indirect-symbol info) and install either the
+    /// actual host implementation or a return-0 stub, exactly like the
+    /// `do_lazy_link` fallback. This turns an infinite re-execute loop into
+    /// graceful continuation. Returns `None` when `svc_pc` is not a known
+    /// stub (guest is executing data or corrupt state).
+    fn install_unimplemented_stub(
+        &mut self,
+        bins: &[MachO],
+        mem: &mut Mem,
+        cpu: &mut Cpu,
+        svc_pc: u32,
+    ) -> Option<(String, HostFunction)> {
+        // Find the stub section containing svc_pc, with its entry size and
+        // PIC offset (same lookup as do_lazy_link).
+        let (stubs, pic_offset) = bins.iter().find_map(|bin| {
+            let stubs = bin.get_section(SectionType::SymbolStubs)?;
+            if !(stubs.addr..(stubs.addr + stubs.size)).contains(&svc_pc) {
+                return None;
+            }
+            let pic_offset = bin
+                .get_section(SectionType::LazySymbolPointers)
+                .map_or(0, |lazy_ptrs| lazy_ptrs.addr - stubs.addr);
+            Some((stubs, pic_offset))
+        })?;
+        let info = stubs.dyld_indirect_symbol_info.as_ref()?;
+        let offset = svc_pc - stubs.addr;
+        if !offset.is_multiple_of(info.entry_size) {
+            return None;
+        }
+        let idx = (offset / info.entry_size) as usize;
+        let symbol = info.indirect_undef_symbols[idx].as_deref()?;
+
+        // Try the real symbol first: a host implementation or a guest dylib
+        // export is strictly better than a return-0 stub.
+        if let Some((resolved, f)) = self.lookup_host_function(symbol) {
+            return self.install_selfheal_stub(mem, cpu, svc_pc, resolved, f, pic_offset);
+        }
+        for dylib in bins.iter() {
+            if let Some(&addr) = dylib.exported_symbols.get(symbol) {
+                let (stub_function_ptr, la_symbol_ptr) =
+                    Self::link_by_restoring_stub(mem, cpu, addr, svc_pc, info.entry_size, pic_offset);
+                log!(
+                    "Self-healed empty function slot at {:#x}: linked {} to guest symbol at {:?}/{:?}.",
+                    svc_pc,
+                    symbol,
+                    stub_function_ptr,
+                    la_symbol_ptr
+                );
+                // The stub now contains the real guest code; restart at
+                // svc_pc (same semantics as a successful lazy link).
+                return None;
+            }
+        }
+        record_unimplemented_api(symbol);
+        let leaked_symbol: &'static str = Box::leak(symbol.to_string().into_boxed_str());
+        let f: HostFunction = &(unimplemented_function_stub as fn(&mut Environment) -> i32);
+        self.install_selfheal_stub(mem, cpu, svc_pc, leaked_symbol, f, pic_offset)
+    }
+
+    /// Write an SVC for `f` at `svc_pc` and return it for immediate dispatch.
+    /// Sets SVC_LAZY_LINK_RET_FLAG unless the stub already ends with a
+    /// `bx lr`, mirroring how `do_lazy_link` discriminates entry sizes.
+    fn install_selfheal_stub(
+        &mut self,
+        mem: &mut Mem,
+        cpu: &mut Cpu,
+        svc_pc: u32,
+        symbol: &'static str,
+        f: HostFunction,
+        _pic_offset: u32,
+    ) -> Option<(String, HostFunction)> {
+        let stub_function_ptr: MutPtr<u32> = Ptr::from_bits(svc_pc);
+        let has_ret = mem.read(stub_function_ptr + 1) == encode_a32_ret();
+        let idx: u32 = self.linked_host_functions.len().try_into().unwrap();
+        let mut svc = idx + Self::SVC_LINKED_FUNCTIONS_BASE;
+        if !has_ret {
+            assert!(svc < Self::SVC_LAZY_LINK_RET_FLAG);
+            svc |= Self::SVC_LAZY_LINK_RET_FLAG;
+        }
+        self.linked_host_functions.push((symbol, f));
+        mem.write(stub_function_ptr, encode_a32_svc(svc));
+        cpu.invalidate_cache_range(stub_function_ptr.to_bits(), 4);
+        log!(
+            "Self-healed empty function slot at {:#x}: installed stub for {} (SVC #{}{}).",
+            svc_pc,
+            symbol,
+            svc,
+            if has_ret { "" } else { ", return via LR" }
+        );
+        Some((symbol.to_owned(), f))
     }
 
     /// Creates a guest function that will call a host function with the name

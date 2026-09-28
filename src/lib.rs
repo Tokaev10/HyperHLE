@@ -560,7 +560,7 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     if options.network_access {
         log!("Network access: enabled by settings");
     } else {
-        log!("Network access: disabled by settings");
+        log!("Network access: disabled by settings (auto-enables when a game requests it)");
     }
 
     if options.fps_limit.is_none() {

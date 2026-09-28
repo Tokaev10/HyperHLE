@@ -293,7 +293,7 @@ fn gethostbyname(env: &mut Environment, name: ConstPtr<u8>) -> MutPtr<u8> {
             "localhost" | "loopback" | "touchHLE" => [127, 0, 0, 1],
             "broadcasthost" => [255, 255, 255, 255],
             _ => {
-                if !env.options.network_access {
+                if !env.ensure_network_access("gethostbyname") {
                     log!(
                         "gethostbyname(\"{}\"): network disabled -> HOST_NOT_FOUND",
                         hostname
@@ -470,7 +470,7 @@ fn getaddrinfo(
     hints: ConstPtr<addrinfo>,
     res: MutPtr<MutPtr<addrinfo>>,
 ) -> i32 {
-    if !env.options.network_access && !node_name.is_null() {
+    if !node_name.is_null() {
         let hn = env
             .mem
             .cstr_at_utf8(node_name.cast_const())
@@ -478,8 +478,10 @@ fn getaddrinfo(
             .to_owned();
         // Allow localhost even without network access.
         if hn != "localhost" && hn != "127.0.0.1" && hn != "touchHLE" && parse_ipv4(&hn).is_none() {
-            log_dbg!("getaddrinfo: network disabled (node={}) -> EAI_FAIL", hn);
-            return EAI_FAIL;
+            if !env.ensure_network_access("getaddrinfo") {
+                log_dbg!("getaddrinfo: network disabled (node={}) -> EAI_FAIL", hn);
+                return EAI_FAIL;
+            }
         }
     }
 
@@ -542,7 +544,7 @@ fn getaddrinfo(
             match hostname.as_str() {
                 "localhost" | "loopback" | "touchHLE" => [127, 0, 0, 1],
                 _ => {
-                    if !env.options.network_access {
+                    if !env.ensure_network_access("getaddrinfo") {
                         log!(
                             "getaddrinfo: network disabled (node={}) -> EAI_FAIL",
                             hostname

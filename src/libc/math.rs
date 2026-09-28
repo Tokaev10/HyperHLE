@@ -699,7 +699,7 @@ fn __isinfd(_env: &mut Environment, arg: f64) -> i32 {
 // __udivdi3: unsigned long long / unsigned long long
 fn __udivdi3(_env: &mut Environment, a: u64, b: u64) -> u64 {
     if b == 0 {
-        log!("Warning: __udivdi3 division by zero!");
+        warn_div_zero("__udivdi3");
         0
     } else {
         a / b
@@ -719,7 +719,7 @@ fn __umoddi3(_env: &mut Environment, a: u64, b: u64) -> u64 {
 // __divdi3: signed long long / signed long long
 fn __divdi3(_env: &mut Environment, a: i64, b: i64) -> i64 {
     if b == 0 {
-        log!("Warning: __divdi3 division by zero!");
+        warn_div_zero("__divdi3");
         0
     } else {
         a / b
@@ -739,7 +739,7 @@ fn __moddi3(_env: &mut Environment, a: i64, b: i64) -> i64 {
 // __udivsi3: unsigned int / unsigned int
 fn __udivsi3(_env: &mut Environment, a: u32, b: u32) -> u32 {
     if b == 0 {
-        log!("Warning: __udivsi3 division by zero!");
+        warn_div_zero("__udivsi3");
         0
     } else {
         a / b
@@ -756,6 +756,22 @@ fn __umodsi3(_env: &mut Environment, a: u32, b: u32) -> u32 {
     }
 }
 
+
+// Division by zero on ARM returns 0 without trapping, so guest code can hit
+// this in hot loops. Sample the warning: first few, then every 4096th.
+fn warn_div_zero(name: &str) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    let n = COUNT.fetch_add(1, Ordering::Relaxed);
+    if n < 4 || n % 4096 == 0 {
+        log!(
+            "Warning: {} division by zero! (sampled: {} occurrences so far)",
+            name,
+            n + 1
+        );
+    }
+}
+
 // compiler-rt builtins for signed 32-bit integer division and modulo. These
 // are emitted by older Apple compilers when no native ARM `sdiv`/`udiv`
 // instruction is available (e.g. armv6 or armv7 without `idiv`).
@@ -763,7 +779,7 @@ fn __umodsi3(_env: &mut Environment, a: u32, b: u32) -> u32 {
 // __divsi3: signed int / signed int
 fn __divsi3(_env: &mut Environment, a: i32, b: i32) -> i32 {
     if b == 0 {
-        log!("Warning: __divsi3 division by zero!");
+        warn_div_zero("__divsi3");
         0
     } else {
         // Use wrapping_div so that i32::MIN / -1 doesn't panic in debug
@@ -786,7 +802,7 @@ fn __modsi3(_env: &mut Environment, a: i32, b: i32) -> i32 {
 // and stores the remainder at `*rem`.
 fn __divmodsi4(env: &mut Environment, a: i32, b: i32, rem: MutPtr<i32>) -> i32 {
     if b == 0 {
-        log!("Warning: __divmodsi4 division by zero!");
+        warn_div_zero("__divmodsi4");
         if !rem.is_null() {
             env.mem.write(rem, 0);
         }
