@@ -33,6 +33,22 @@ pub(super) struct State {
     recomposite_next: Option<Instant>,
     fps_counter: Option<FpsCounter>,
     misc_gl_objects: Option<MiscGlObjects>,
+    /// Set when the guest renders directly into the default framebuffer (the
+    /// window surface) instead of its own framebuffer objects — detected via
+    /// the "presents with renderbuffer binding 0 / unbacked renderbuffer"
+    /// signature (e.g. Dead Space). The compositor must then never write the
+    /// window surface (it would feed the guest's next readback its own
+    /// previous composite, rotating and shrinking the image every frame), so
+    /// the composite is read out of the texture framebuffer and presented
+    /// through the host pixel path instead.
+    guest_owns_default_framebuffer: bool,
+}
+
+/// Marks the guest as a default-framebuffer renderer (see [State]). Sticky
+/// for the rest of the app run: no guest ever expects the compositor to write
+/// the window surface, so leaving it on is always safe.
+pub fn set_guest_owns_default_framebuffer(env: &mut Environment, value: bool) {
+    env.framework_state.core_animation.composition.guest_owns_default_framebuffer = value;
 }
 
 struct MiscGlObjects {
@@ -470,28 +486,32 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
 
     // Present our rendered frame (bound to TEXTURE_2D). This copies it to the
     // default framebuffer (0) so we need to unbind our internal framebuffer.
+    let guest_owns_default_fb = env
+        .framework_state
+        .core_animation
+        .composition
+        .guest_owns_default_framebuffer;
     unsafe {
         gles.BindTexture(gles11::TEXTURE_2D, texture);
-        gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, 0);
-        present_frame(
-            gles.as_mut(),
-            present_frame_args.0,
-            present_frame_args.1,
-            present_frame_args.2,
-        );
         gles.BindBuffer(gles11::ARRAY_BUFFER, saved_array_buffer as _);
         gles.BindBuffer(
             gles11::ELEMENT_ARRAY_BUFFER,
             saved_element_array_buffer as _,
         );
-        let _ = gles.GetError();
     }
-    if frame_generation {
-        unsafe {
-            gles.Finish();
-        }
+    if guest_owns_default_fb {
+        // The guest renders straight into the default framebuffer (the window
+        // surface), so writing our composite there would poison the guest's
+        // next readback with the previous composite — every cycle would add
+        // another quarter-turn and another scale-down (seen as an endlessly
+        // rotating, shrinking image in Dead Space). Instead, read the
+        // composite out of the texture framebuffer and hand it to the host
+        // pixel presentation path, which never touches the window surface.
+        // This also covers frame generation, whose interpolation lives
+        // inside `present_native_frame`.
         let mut pixels = vec![0u8; fb_width as usize * fb_height as usize * 4];
         unsafe {
+            gles.Finish();
             gles.ReadPixels(
                 0,
                 0,
@@ -501,12 +521,46 @@ pub fn recomposite_if_necessary(env: &mut Environment, force: bool) -> Option<In
                 gles11::UNSIGNED_BYTE,
                 pixels.as_mut_ptr().cast(),
             );
+            // Hand the default framebuffer back to the guest exactly as it
+            // had it (it presents with framebuffer 0 bound).
+            gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, 0);
+            let _ = gles.GetError();
         }
         std::mem::drop(gles);
         window.present_native_frame(pixels, fb_width, fb_height, true);
     } else {
-        std::mem::drop(gles);
-        window.swap_window();
+        unsafe {
+            gles.BindFramebufferOES(gles11::FRAMEBUFFER_OES, 0);
+            present_frame(
+                gles.as_mut(),
+                present_frame_args.0,
+                present_frame_args.1,
+                present_frame_args.2,
+            );
+            let _ = gles.GetError();
+        }
+        if frame_generation {
+            unsafe {
+                gles.Finish();
+            }
+            let mut pixels = vec![0u8; fb_width as usize * fb_height as usize * 4];
+            unsafe {
+                gles.ReadPixels(
+                    0,
+                    0,
+                    fb_width as _,
+                    fb_height as _,
+                    gles11::RGBA,
+                    gles11::UNSIGNED_BYTE,
+                    pixels.as_mut_ptr().cast(),
+                );
+            }
+            std::mem::drop(gles);
+            window.present_native_frame(pixels, fb_width, fb_height, true);
+        } else {
+            std::mem::drop(gles);
+            window.swap_window();
+        }
     }
 
     animation_state.update_started_and_finished_animations(env);

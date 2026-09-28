@@ -703,10 +703,17 @@ pub const CLASSES: ClassExports = objc_classes! {
         return false;
     };
 
+    let mut guest_renders_into_default_fb = false;
     let renderbuffer: GLuint = unsafe {
         let mut renderbuffer = 0;
         gles.GetIntegerv(gles11::RENDERBUFFER_BINDING_OES, &mut renderbuffer);
         if renderbuffer == 0 {
+            // Presenting with nothing bound is the signature of an app that
+            // draws straight into the default framebuffer (the window
+            // surface) and expects its contents to persist there - real iOS
+            // never writes that surface behind the app's back, and neither
+            // must we (Dead Space is the canonical case).
+            guest_renders_into_default_fb = true;
             if let Some((fallback, drawable)) = fallback_renderbuffer {
                 gles.BindRenderbufferOES(gles11::RENDERBUFFER_OES, fallback);
                 log_once_fmt!(
@@ -719,7 +726,6 @@ pub const CLASSES: ClassExports = objc_classes! {
         }
         renderbuffer as _
     };
-
     if gles.is_software() {
         let frame = gles.software_frame();
         std::mem::drop(gles);
@@ -736,6 +742,13 @@ pub const CLASSES: ClassExports = objc_classes! {
     }
 
     std::mem::drop(gles);
+
+    // Record the signature where it can influence presentation. This runs
+    // after the `gles`/`window` scope is dropped so it can borrow `env`
+    // mutably.
+    if guest_renders_into_default_fb {
+        crate::frameworks::core_animation::set_guest_owns_default_framebuffer(env, true);
+    }
 
     let bindings: Vec<(GLuint, id)> = env
         .objc
@@ -773,7 +786,11 @@ pub const CLASSES: ClassExports = objc_classes! {
 
     // We're presenting to the opaque CAEAGLLayer that covers the screen.
     // We can use the fast path where we skip composition and present directly.
-    if drawable == fullscreen_layer {
+    // Apps that draw into the default framebuffer are excluded: the fast path
+    // would present the empty drawable renderbuffer (black screen), and the
+    // compositor must run so its output can be presented without touching the
+    // window surface the guest owns.
+    if drawable == fullscreen_layer && !guest_renders_into_default_fb {
         let presentation_mode = {
             let maybe_gles = super::sync_context(
                 &mut env.framework_state.opengles,
