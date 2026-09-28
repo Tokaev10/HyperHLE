@@ -227,9 +227,10 @@ fn run_native_decode(
     // dimensions (the compositor uploads with those). The decoder's actual
     // output can differ - H.264 pictures are macroblock-aligned, so e.g. a
     // 1279x720 track decodes to a 1280x720 picture - so the staging buffer is
-    // sized to the decoder's dimensions on first use and cropped back down
-    // during the flip. openh264's write_rgba8 asserts an exact-size buffer,
-    // which previously panicked the whole emulator (BioShock intro video).
+    // resized per frame to the decoder's actual dimensions and cropped back
+    // down during the flip. Conversion is done manually below instead of via
+    // openh264's write_rgba8, which asserts an exact-size buffer and
+    // previously panicked the whole emulator (BioShock intro video).
     let frame_len = (width as usize) * (height as usize) * 4;
     let mut rgba: Vec<u8> = Vec::new();
     let mut flipped = vec![0u8; frame_len];
@@ -293,10 +294,42 @@ fn run_native_decode(
                 Ok(Some(yuv)) => {
                     let (dec_w, dec_h) = yuv.dimensions();
                     let (dec_w, dec_h) = (dec_w as usize, dec_h as usize);
+                    let (ys, us, _vs) = yuv.strides();
+                    let (ys, us) = (ys as usize, us as usize);
                     if rgba.len() != dec_w * dec_h * 4 {
                         rgba = vec![0u8; dec_w * dec_h * 4];
                     }
-                    yuv.write_rgba8(&mut rgba);
+                    // Manual I420->RGBA conversion instead of openh264's
+                    // write_rgba8: that helper asserts on buffer size and
+                    // format, and H.264 pictures can change dimensions
+                    // mid-stream (a 1279x720 container track decoding to a
+                    // 1280x720 picture panicked the whole emulator). Doing
+                    // the math here with stride-aware reads never panics.
+                    let (y_b, u_b, v_b) = (yuv.y(), yuv.u(), yuv.v());
+                    let uv_w = us.min(dec_w / 2);
+                    let y_stride = ys.max(dec_w);
+                    for row in 0..dec_h {
+                        let y_row = &y_b[row * y_stride..row * y_stride + dec_w];
+                        let uv_row_off = (row / 2) * us;
+                        let u_row = &u_b[uv_row_off..uv_row_off + uv_w];
+                        let v_row = &v_b[uv_row_off..uv_row_off + uv_w];
+                        let dst = &mut rgba[row * dec_w * 4..(row + 1) * dec_w * 4];
+                        for col in 0..dec_w {
+                            let (yv, uv, vv) = (
+                                y_row[col] as i32,
+                                u_row[col / 2] as i32 - 128,
+                                v_row[col / 2] as i32 - 128,
+                            );
+                            let r = (yv + ((91881 * vv) >> 16)).clamp(0, 255);
+                            let g = (yv - ((22554 * vv + 46802 * uv) >> 16)).clamp(0, 255);
+                            let b = (yv + ((116130 * uv) >> 16)).clamp(0, 255);
+                            let o = col * 4;
+                            dst[o] = r as u8;
+                            dst[o + 1] = g as u8;
+                            dst[o + 2] = b as u8;
+                            dst[o + 3] = 255;
+                        }
+                    }
                     // Flip vertically for the compositor's bottom-first rows,
                     // cropping/padding to the track's declared size.
                     let copy_w = dec_w.min(width as usize) * 4;
