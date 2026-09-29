@@ -11,7 +11,7 @@ use crate::abi::{DotDotDot, VaList};
 use crate::dyld::{export_c_func, FunctionExports};
 use crate::frameworks::foundation::{ns_string, unichar};
 use crate::libc::clocale::{setlocale, LC_CTYPE};
-use crate::libc::errno::set_errno;
+use crate::libc::errno::{set_errno, EOVERFLOW};
 use crate::libc::posix_io::{STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO};
 use crate::libc::stdio::{fwrite, getc, ungetc, EOF, FILE};
 use crate::libc::stdlib::{atof_inner_generic, str_to_int_inner_generic};
@@ -22,6 +22,17 @@ use crate::objc::{id, msg, nil};
 use crate::Environment;
 use std::collections::HashSet;
 use std::io::Write;
+
+/// Upper bound for a single field width or precision parsed from a format
+/// string. Real apps never use values this large; the cap stops a hostile
+/// or corrupt format string (e.g. "%99999999999d") from making the host
+/// allocate gigabytes of padding.
+const MAX_FIELD_WIDTH: u32 = 1 << 20;
+
+/// Upper bound on total formatted output. An allocation failure in Rust
+/// aborts the process, so cap the total to keep a hostile format string
+/// from taking down the emulator.
+const MAX_TOTAL_OUTPUT: usize = 64 * 1024 * 1024;
 
 // ALL_SPECIFIERS: d i o u x X f F e E g G a A c s p n C S % @ D U O = 25
 // + b'+' b'#' b'-' would be 28 but those are flags not specifiers — omit them.
@@ -55,6 +66,15 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
         let c = get_format_char(&env.mem, format_char_idx);
         format_char_idx += 1;
 
+        if res.len() >= MAX_TOTAL_OUTPUT {
+            // Malicious or corrupt format string (e.g. huge widths repeated
+            // many times); stop rather than exhausting host memory.
+            log!(
+                "printf_inner: output exceeded {} bytes; truncating.",
+                MAX_TOTAL_OUTPUT
+            );
+            break;
+        }
         if c == b'\0' {
             break;
         }
@@ -96,29 +116,44 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
         } else {
             let mut pad_width: i32 = 0;
             while let c @ b'0'..=b'9' = get_format_char(&env.mem, format_char_idx) {
-                pad_width = pad_width * 10 + (c - b'0') as i32;
+                // Saturating: a long digit run in a corrupt format string
+                // must not overflow (panic in debug builds).
+                pad_width = pad_width
+                    .saturating_mul(10)
+                    .saturating_add((c - b'0') as i32);
                 format_char_idx += 1;
             }
             pad_width
         };
-        assert!(pad_width >= 0); // TODO: Implement right-padding
+        // C11 §7.21.6.1: a negative field-width argument (via `*`) is
+        // equivalent to a `-` flag followed by the absolute value, i.e. the
+        // result is left-justified within a field of that width.
+        let left_justified = if pad_width < 0 { true } else { left_justified };
+        let pad_width = pad_width.unsigned_abs().min(MAX_FIELD_WIDTH);
 
         let precision = if get_format_char(&env.mem, format_char_idx) == b'.' {
             format_char_idx += 1;
             let precision = if get_format_char(&env.mem, format_char_idx) == b'*' {
                 let precision = args.next::<i32>(env);
-                assert!(precision >= 0); // TODO: ignore negative
                 format_char_idx += 1;
-                precision as usize
+                // C11 §7.21.6.1: a negative precision argument (via `*`) is
+                // treated as if the precision were omitted entirely.
+                precision.max(0) as usize
             } else {
-                let mut precision = 0;
+                let mut precision: usize = 0;
                 while let c @ b'0'..=b'9' = get_format_char(&env.mem, format_char_idx) {
-                    precision = precision * 10 + (c - b'0') as usize;
+                    // Saturating: a long digit run in a corrupt format
+                    // string must not overflow (panic in debug builds).
+                    precision = precision
+                        .saturating_mul(10)
+                        .saturating_add((c - b'0') as usize);
                     format_char_idx += 1;
                 }
                 precision
             };
-            Some(precision)
+            // Cap the precision so a hostile format string cannot make the
+            // host allocate absurd amounts of memory.
+            Some(precision.min(MAX_FIELD_WIDTH as usize))
         } else {
             None
         };
@@ -185,13 +220,9 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
             continue;
         }
 
-        if precision.is_some() {
-            assert!(
-                INTEGER_SPECIFIERS.contains(&specifier)
-                    || FLOAT_SPECIFIERS.contains(&specifier)
-                    || specifier == b's'
-            )
-        }
+        // Precision only applies to integer, float and string conversions;
+        // for anything else (e.g. %c, %p, %@) real libcs silently ignore it
+        // rather than aborting, so we do the same.
 
         match specifier {
             // Integer specifiers
@@ -211,9 +242,20 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                     write!(&mut res, "{ch}").unwrap();
                 } else {
                     let c: u8 = args.next(env);
-                    assert!(pad_char == ' ' && pad_width == 0);
-                    // TODO
-                    res.push(c);
+                    // Pad the character like a string instead of aborting when
+                    // a width is given (e.g. "%5c"); matches C semantics.
+                    if pad_width > 0 {
+                        let pad_width = pad_width as usize;
+                        if left_justified {
+                            write!(&mut res, "{c:<pad_width$}").unwrap();
+                        } else if pad_char == '0' {
+                            write!(&mut res, "{c:0>pad_width$}").unwrap();
+                        } else {
+                            write!(&mut res, "{c:>pad_width$}").unwrap();
+                        }
+                    } else {
+                        res.push(c);
+                    }
                 }
             }
             // Apple extension?
@@ -226,39 +268,101 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 let _ = prepend_sign;
                 // Убрали assert!(length_modifier.is_none());
                 let c: unichar = args.next(env);
-                assert!(pad_char == ' ' && pad_width == 0);
                 // Заменяем .unwrap() на .unwrap_or('?'), чтобы не было паники
                 // на невалидном UTF-16!
                 let c = char::from_u32(c.into()).unwrap_or('?');
-                write!(&mut res, "{c}").unwrap();
+                if pad_width > 0 {
+                    let pad_width = pad_width as usize;
+                    if left_justified {
+                        write!(&mut res, "{c:<pad_width$}").unwrap();
+                    } else if pad_char == '0' {
+                        write!(&mut res, "{c:0>pad_width$}").unwrap();
+                    } else {
+                        write!(&mut res, "{c:>pad_width$}").unwrap();
+                    }
+                } else {
+                    write!(&mut res, "{c}").unwrap();
+                }
             }
             b's' => {
                 // assert!(!prepend_sign);
-                // TODO: support length modifier
-                // assert!(length_modifier.is_none());
-                let c_string: ConstPtr<u8> = args.next(env);
-                // assert!(pad_char == ' ');
-                // TODO
-                if !c_string.is_null() {
-                    if let Some(precision) = precision {
-                        let str_len = strlen(env, c_string);
-                        res.extend_from_slice(
-                            env.mem.bytes_at(c_string, str_len.min(precision as _)),
-                        )
-                    } else if pad_width > 0 {
+                // %ls takes a wchar_t* argument and behaves like the %S
+                // conversion; %s and %hs take a narrow C string. Only the
+                // "C" locale is supported, so wide characters map 1:1 to
+                // UTF-8, exactly as in the %S branch below.
+                if length_modifier == Some("l") {
+                    let w_string: ConstPtr<wchar_t> = args.next(env);
+                    let mut s: String = if !w_string.is_null() {
+                        let w = env.mem.wcstr_at(w_string);
+                        // For %ls, precision limits the number of wide
+                        // characters written, then width pads the result.
+                        match precision {
+                            Some(precision) => w.chars().take(precision).collect(),
+                            None => w,
+                        }
+                    } else {
+                        // POSIX: a null pointer for %s/%ls prints "(null)".
+                        "(null)".to_string()
+                    };
+                    if pad_width > 0 {
                         let pad_width = pad_width as usize;
-                        let str = env.mem.cstr_at_utf8(c_string).unwrap();
+                        if left_justified {
+                            s = format!("{s:<pad_width$}");
+                        } else if pad_char == '0' {
+                            s = format!("{s:0>pad_width$}");
+                        } else {
+                            s = format!("{s:>pad_width$}");
+                        }
+                    }
+                    res.extend_from_slice(s.as_bytes());
+                    continue;
+                }
+                let c_string: ConstPtr<u8> = args.next(env);
+                if !c_string.is_null() {
+                    // Apply precision first (max bytes written), then padding.
+                    // Use lossy UTF-8 conversion instead of panicking on
+                    // invalid guest strings.
+                    let truncated: Vec<u8> = if let Some(precision) = precision {
+                        let str_len = strlen(env, c_string);
+                        env.mem
+                            .bytes_at(c_string, str_len.min(precision as _))
+                            .to_vec()
+                    } else {
+                        env.mem.cstr_at(c_string).to_vec()
+                    };
+                    if pad_width > 0 {
+                        let pad_width = pad_width as usize;
+                        let str = String::from_utf8_lossy(&truncated);
                         if left_justified {
                             write!(&mut res, "{str:<pad_width$}").unwrap();
+                        } else if pad_char == '0' {
+                            write!(&mut res, "{str:0>pad_width$}").unwrap();
                         } else {
                             write!(&mut res, "{str:>pad_width$}").unwrap();
                         }
                     } else {
-                        res.extend_from_slice(env.mem.cstr_at(c_string));
+                        res.extend_from_slice(&truncated);
                     }
                 } else {
-                    // assert!(precision.is_none());
-                    res.extend_from_slice("(null)".as_bytes());
+                    // POSIX: a null pointer for %s is printed as "(null)",
+                    // still subject to precision and field width.
+                    let fallback = "(null)";
+                    let truncated: &str = match precision {
+                        Some(precision) => &fallback[..fallback.len().min(precision)],
+                        None => fallback,
+                    };
+                    if pad_width > 0 {
+                        let pad_width = pad_width as usize;
+                        if left_justified {
+                            write!(&mut res, "{truncated:<pad_width$}").unwrap();
+                        } else if pad_char == '0' {
+                            write!(&mut res, "{truncated:0>pad_width$}").unwrap();
+                        } else {
+                            write!(&mut res, "{truncated:>pad_width$}").unwrap();
+                        }
+                    } else {
+                        res.extend_from_slice(truncated.as_bytes());
+                    }
                 }
             }
             b'S' => {
@@ -266,14 +370,36 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 // rather than aborting (matches glibc / Apple behaviour).
                 let _ = prepend_sign;
                 // Убрали assert!(length_modifier.is_none());
-                // TODO: support other locales
+                // Only the "C" locale is supported, but apps sometimes
+                // request e.g. "UTF-8"; tolerate a mismatch rather than
+                // aborting the emulator (pragmatic hardcoding).
                 let ctype_locale = setlocale(env, LC_CTYPE, Ptr::null());
-                assert_eq!(env.mem.read(ctype_locale), b'C');
+                if env.mem.read(ctype_locale) != b'C' {
+                    log!(
+                        "Warning: printf family got a non-'C' LC_CTYPE \
+locale; treating it as 'C'."
+                    );
+                }
                 let w_string: ConstPtr<wchar_t> = args.next(env);
-                assert!(pad_char == ' ' && pad_width == 0);
-                // TODO
                 if !w_string.is_null() {
-                    res.extend_from_slice(env.mem.wcstr_at(w_string).as_bytes());
+                    let w = env.mem.wcstr_at(w_string);
+                    // Precision for %S limits the number of wide characters
+                    // written; width then pads the result.
+                    let mut s: String = match precision {
+                        Some(precision) => w.chars().take(precision).collect(),
+                        None => w,
+                    };
+                    if pad_width > 0 {
+                        let pad_width = pad_width as usize;
+                        if left_justified {
+                            s = format!("{s:<pad_width$}");
+                        } else if pad_char == '0' {
+                            s = format!("{s:0>pad_width$}");
+                        } else {
+                            s = format!("{s:>pad_width$}");
+                        }
+                    }
+                    res.extend_from_slice(s.as_bytes());
                 } else {
                     res.extend_from_slice("(null)".as_bytes());
                 }
@@ -329,12 +455,24 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 let _ = prepend_sign;
                 // Убрали assert!(length_modifier.is_none());
                 let object: id = args.next(env);
-                // TODO: use localized description if available?
+                // %@ uses `description`; apps can override it with a
+                // localized variant via `descriptionWithLocale:`, which we do
+                // not implement, so plain `description` is used for all
+                // locales.
                 let description: id = msg![env; object description];
                 if description != nil {
-                    // TODO: avoid copy
-                    // TODO: what if the description isn't valid UTF-16?
-                    let description = ns_string::to_rust_string(env, description);
+                    // Copy the code units and decode lossily ourselves so a
+                    // description with lone surrogates can't panic.
+                    let description_len: crate::mem::GuestUSize = msg![env; description length];
+                    // Fetch each code unit individually rather than
+                    // borrowing a buffer.
+                    let mut units_vec = Vec::with_capacity(description_len as usize);
+                    for idx in 0..description_len {
+                        let unit: u16 = msg![env; description
+                            characterAtIndex:idx];
+                        units_vec.push(unit);
+                    }
+                    let description = String::from_utf16_lossy(&units_vec);
                     write!(&mut res, "{description}").unwrap();
                 } else {
                     write!(&mut res, "(null)").unwrap();
@@ -516,9 +654,12 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 let tmp = format!("{:#x}", ptr.to_bits());
                 if pad_width > 0 {
                     let pad_width = pad_width as usize;
-                    assert!(pad_char == ' '); // TODO
+                    // C standard leaves `0` padding for %p implementation-
+                    // defined; support it like the other integer pads.
                     if left_justified {
                         write!(&mut res, "{tmp:<pad_width$}").unwrap();
+                    } else if pad_char == '0' {
+                        write!(&mut res, "{tmp:0>pad_width$}").unwrap();
                     } else {
                         write!(&mut res, "{tmp:>pad_width$}").unwrap();
                     }
@@ -551,7 +692,7 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                     if precision == 0 {
                         1
                     } else {
-                        precision.try_into().unwrap()
+                        precision.try_into().unwrap_or(i32::MAX)
                     }
                 } else {
                     6
@@ -570,11 +711,16 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                     X
                 );
                 if P > X && X >= -4 {
-                    let precision: usize = (P - X - 1).try_into().unwrap();
+                    // Saturating math: P and X are guest-influenced, and an
+                    // overflow here would panic in debug builds.
+                    let precision: usize = P.saturating_sub(X).saturating_sub(1).max(0) as usize;
                     let result = f_format(float, pad_width, pad_char, precision, left_justified);
 
-                    // TODO: skip if alternative representation is requested
-                    let trimmed_result = if result.contains('.') {
+                    // With the '#' (alternative representation) flag the
+                    // trailing zeros are NOT removed.
+                    let trimmed_result: &str = if alternative_form {
+                        &result
+                    } else if result.contains('.') {
                         result.trim_end_matches('0').trim_end_matches('.')
                     } else {
                         &result
@@ -593,7 +739,7 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                     let trimmed_result = apply_float_sign(&trimmed_result, float, prepend_sign);
                     res.extend_from_slice(trimmed_result.as_bytes());
                 } else {
-                    let precision: usize = (P - 1).try_into().unwrap();
+                    let precision: usize = P.saturating_sub(1).max(0) as usize;
                     let formatted = e_format(float, pad_width, pad_char, precision, left_justified);
                     let formatted = apply_float_sign(&formatted, float, prepend_sign);
                     res.extend_from_slice(formatted.as_bytes());
@@ -621,7 +767,13 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                 let float: f64 = args.next(env);
                 let pad_width = pad_width as usize;
                 let p: i32 = precision
-                    .map(|p| if p == 0 { 1 } else { p as i32 })
+                    .map(|p| {
+                        if p == 0 {
+                            1
+                        } else {
+                            p.try_into().unwrap_or(i32::MAX)
+                        }
+                    })
                     .unwrap_or(6);
                 let x: i32 = if float == 0.0 {
                     0
@@ -629,12 +781,13 @@ pub fn printf_inner<const NS_LOG: bool, F: Fn(&Mem, GuestUSize) -> u8>(
                     float.abs().log10().floor() as i32
                 };
                 let s = if p > x && x >= -4 {
-                    let prec = (p - x - 1) as usize;
+                    let prec = p.saturating_sub(x).saturating_sub(1).max(0) as usize;
                     let raw = f_format(float, 0, ' ', prec, false);
                     let trimmed = raw.trim_end_matches('0').trim_end_matches('.');
                     apply_pad(trimmed, pad_width, pad_char, left_justified)
                 } else {
-                    e_format(float, pad_width, pad_char, (p - 1) as usize, left_justified)
+                    let prec = p.saturating_sub(1).max(0) as usize;
+                    e_format(float, pad_width, pad_char, prec, left_justified)
                 };
                 let s = apply_float_sign(&s.to_uppercase(), float, prepend_sign);
                 res.extend_from_slice(s.as_bytes());
@@ -714,14 +867,30 @@ fn f_format(
     precision: usize,
     left_justified: bool,
 ) -> String {
+    if float.is_nan() {
+        // Rust's formatter prints "NaN"; C's printf prints "nan".
+        let s = "nan";
+        if left_justified {
+            return format!("{s:<pad_width$}");
+        } else if pad_char == '0' {
+            return format!("{s:0>pad_width$}");
+        } else {
+            return format!("{s:>pad_width$}");
+        }
+    }
     if left_justified {
         format!("{float:<pad_width$.precision$}")
     } else if pad_char == '0' {
         format!("{float:0>pad_width$.precision$}")
     } else {
-        assert!(pad_char == ' ');
-        // TODO
-        format!("{float:>pad_width$.precision$}")
+        // Space-padded right-justification: sign, then digits padded
+        // with spaces to fill the total width.
+        let formatted = format!("{float:.precision$}");
+        if formatted.len() < pad_width {
+            format!("{}{}", " ".repeat(pad_width - formatted.len()), formatted)
+        } else {
+            formatted
+        }
     }
 }
 
@@ -732,6 +901,16 @@ fn e_format(
     precision: usize,
     left_justified: bool,
 ) -> String {
+    if !float.is_finite() {
+        let s = if float.is_nan() {
+            "nan"
+        } else if float.is_sign_negative() {
+            "-inf"
+        } else {
+            "inf"
+        };
+        return apply_pad(s, pad_width, pad_char, left_justified);
+    }
     let exponent = if float == 0.0 {
         0.0
     } else {
@@ -752,9 +931,12 @@ fn e_format(
             pad_width.saturating_sub(sign.len())
         )
     } else {
-        assert!(pad_char == ' ');
-        // TODO
-        format!("{full_str:>pad_width$}")
+        // Space-padded right-justification.
+        if full_str.len() < pad_width {
+            format!("{}{}", " ".repeat(pad_width - full_str.len()), full_str)
+        } else {
+            full_str
+        }
     }
 }
 
@@ -824,6 +1006,10 @@ fn apply_int_pad(
 ) -> String {
     let with_prec = if precision.is_some_and(|p| p > 0) {
         format!("{:01$}", int, precision.unwrap())
+    } else if precision.is_some() && int == 0 {
+        // C11 §7.21.6.1: a precision of 0 with a value of 0 produces no
+        // characters for d/i conversions.
+        String::new()
     } else {
         format!("{int}")
     };
@@ -857,6 +1043,10 @@ fn apply_uint_pad(
 ) -> String {
     let with_prec = if precision.is_some_and(|p| p > 0) {
         format!("{:01$}", uint, precision.unwrap())
+    } else if precision.is_some() && uint == 0 {
+        // C11 §7.21.6.1: a precision of 0 with a value of 0 produces no
+        // characters for unsigned conversions.
+        String::new()
     } else {
         format!("{uint}")
     };
@@ -870,7 +1060,8 @@ fn snprintf(
     format: ConstPtr<u8>,
     args: DotDotDot,
 ) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!("snprintf() implemented as a wrapper of vsnprintf()");
 
@@ -904,7 +1095,8 @@ fn vasprintf(
 }
 
 fn vprintf(env: &mut Environment, format: ConstPtr<u8>, arg: VaList) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "vprintf({:?} ({:?}), ...)",
@@ -912,8 +1104,12 @@ fn vprintf(env: &mut Environment, format: ConstPtr<u8>, arg: VaList) -> i32 {
         env.mem.cstr_at_utf8(format)
     );
     let res = printf_inner::<false, _>(env, |mem, idx| mem.read(format + idx), arg);
-    // TODO: I/O error handling
-    let _ = std::io::stdout().write_all(&res);
+    // Real libc returns a negative value when writing to stdout fails
+    // (e.g. a closed pipe); mirror that instead of ignoring the error.
+    if std::io::stdout().write_all(&res).is_err() {
+        log!("Warning: vprintf(): writing to stdout failed; returning EOF.");
+        return EOF;
+    }
     res.len().try_into().unwrap()
 }
 
@@ -924,7 +1120,8 @@ fn vsnprintf(
     format: ConstPtr<u8>,
     arg: VaList,
 ) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "vsnprintf({:?} {:?} {:?})",
@@ -941,7 +1138,22 @@ fn vsnprintf(
     } else {
         &res[..]
     };
-    let dest_slice = env.mem.bytes_at_mut(dest, n);
+    // Only write as many bytes as actually needed (formatted chars + NUL),
+    // which is always <= n. Some apps pass a bogus huge `n` (e.g. -1);
+    // using `n` directly for the slice would go out of bounds and either
+    // panic or silently discard the write.
+    let write_count: GuestUSize = (middle.len() + 1).try_into().unwrap();
+    let Some(dest_slice) = env
+        .mem
+        .get_bytes_fallible_mut(dest.cast().cast_const(), write_count)
+    else {
+        log!(
+            "Warning: vsnprintf: destination {:?} out of range for {} bytes; skipping write.",
+            dest,
+            write_count
+        );
+        return res.len().try_into().unwrap();
+    };
     for (i, &byte) in middle.iter().chain(b"\0".iter()).enumerate() {
         dest_slice[i] = byte;
     }
@@ -1004,7 +1216,8 @@ fn __vsprintf_chk(
 }
 
 fn vsprintf(env: &mut Environment, dest: MutPtr<u8>, format: ConstPtr<u8>, arg: VaList) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "vsprintf({:?}, {:?} ({:?}), ...)",
@@ -1045,9 +1258,14 @@ fn __sprintf_chk(
         );
         return 0;
     }
-    // TODO: respect flags level
-    // TODO: full overflow check
-    sprintf(env, dest, format, args)
+    // The `flags` level selects __chk_fail() strictness in the real libc;
+    // we never abort the host, so it is simply ignored.
+    let _ = _flags;
+    set_errno(env, 0);
+    // Clamp the write to the compiler-known buffer size so an oversized
+    // result cannot corrupt guest memory past `dest`. vsnprintf() keeps
+    // sprintf()'s return-value semantics (the untruncated length).
+    vsnprintf(env, dest, strlen, format, args.start())
 }
 
 // Locale-aware printf variants from `xlocale.h`. touchHLE only supports a
@@ -1097,7 +1315,8 @@ fn vsnprintf_l(
 }
 
 fn sprintf(env: &mut Environment, dest: MutPtr<u8>, format: ConstPtr<u8>, args: DotDotDot) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "sprintf({:?}, {:?} ({:?}), ...)",
@@ -1123,7 +1342,8 @@ fn swprintf(
     format: ConstPtr<wchar_t>,
     args: DotDotDot,
 ) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!("swprintf() implemented as a wrapper of vswprintf()");
 
@@ -1137,11 +1357,15 @@ fn vswprintf(
     format: ConstPtr<wchar_t>,
     args: VaList,
 ) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
-    // TODO: support other locales
+    // Only the "C" locale is supported, but apps sometimes request e.g.
+    // "UTF-8"; tolerate a mismatch rather than aborting the emulator.
     let ctype_locale = setlocale(env, LC_CTYPE, Ptr::null());
-    assert_eq!(env.mem.read(ctype_locale), b'C');
+    if env.mem.read(ctype_locale) != b'C' {
+        log!("non-'C' LC_CTYPE locale set; treating it as 'C'.");
+    }
 
     let wcstr_format = env.mem.wcstr_at(format);
     log_dbg!(
@@ -1169,7 +1393,10 @@ fn vswprintf(
         env.mem.write(ws + i, res[i as usize] as wchar_t);
     }
     if to_write >= n {
-        // TODO: set errno
+        // The output did not fit in the buffer; the caller cannot know
+        // how much was written, so report -1 (BSD behaviour) with a
+        // plausible errno for the "value too large" condition.
+        set_errno(env, EOVERFLOW);
         return -1;
     }
     env.mem.write(ws + to_write, wchar_t::default());
@@ -1177,12 +1404,16 @@ fn vswprintf(
 }
 
 fn wprintf(env: &mut Environment, format: ConstPtr<wchar_t>, args: DotDotDot) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
 
-    // TODO: support other locales
+    // Only the "C" locale is supported, but apps sometimes request e.g.
+    // "UTF-8"; tolerate a mismatch rather than aborting the emulator.
     let ctype_locale = setlocale(env, LC_CTYPE, Ptr::null());
-    assert_eq!(env.mem.read(ctype_locale), b'C');
+    if env.mem.read(ctype_locale) != b'C' {
+        log!("non-'C' LC_CTYPE locale set; treating it as 'C'.");
+    }
 
     let wcstr_format = env.mem.wcstr_at(format);
     log_dbg!("wprintf({:?} ({:?}), ...)", format, wcstr_format);
@@ -1201,12 +1432,18 @@ fn wprintf(env: &mut Environment, format: ConstPtr<wchar_t>, args: DotDotDot) ->
         args.start(),
     );
 
-    let _ = std::io::stdout().write_all(&res);
+    // Real libc returns a negative value when writing to stdout fails;
+    // mirror that instead of ignoring the error.
+    if std::io::stdout().write_all(&res).is_err() {
+        log!("Warning: wprintf(): writing to stdout failed; returning EOF.");
+        return EOF;
+    }
     res.len().try_into().unwrap()
 }
 
 fn printf(env: &mut Environment, format: ConstPtr<u8>, args: DotDotDot) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "printf({:?} ({:?}), ...)",
@@ -1214,12 +1451,27 @@ fn printf(env: &mut Environment, format: ConstPtr<u8>, args: DotDotDot) -> i32 {
         env.mem.cstr_at_utf8(format)
     );
     let res = printf_inner::<false, _>(env, |mem, idx| mem.read(format + idx), args.start());
-    // TODO: I/O error handling
-    let _ = std::io::stdout().write_all(&res);
+    // Real libc returns a negative value when writing to stdout fails
+    // (e.g. a closed pipe); mirror that instead of ignoring the error.
+    if std::io::stdout().write_all(&res).is_err() {
+        log!("Warning: printf(): writing to stdout failed; returning EOF.");
+        return EOF;
+    }
     res.len().try_into().unwrap()
 }
 
-// TODO: more printf variants
+/// `asprintf()` — BSD/Darwin extension that formats into a freshly
+/// allocated buffer and returns a pointer to it via `ret`.
+fn asprintf(
+    env: &mut Environment,
+    ret: MutPtr<MutPtr<u8>>,
+    format: ConstPtr<u8>,
+    args: DotDotDot,
+) -> i32 {
+    log_dbg!("asprintf() implemented as a wrapper of vasprintf()");
+
+    vasprintf(env, ret, format, args.start())
+}
 
 /// A simple wrapper around [sscanf_common_generic] for the case of C string.
 fn sscanf_common(
@@ -1323,7 +1575,11 @@ where
         };
         let mut max_width: u32 = 0;
         while let c @ b'0'..=b'9' = env.mem.read(format + format_char_idx) {
-            max_width = max_width * 10 + (c - b'0') as u32;
+            // Saturating: a long digit run in a corrupt format string must
+            // not overflow (panic in debug builds).
+            max_width = max_width
+                .saturating_mul(10)
+                .saturating_add((c - b'0') as u32);
             format_char_idx += 1;
         }
 
@@ -1796,9 +2052,9 @@ where
                         env.mem.write(ptr, b'\0');
                     }
                 } else {
-                    if !suppress_assignment {
-                        matched_args -= 1;
-                    }
+                    // Matching failure: per C11 §7.21.6.2 scanning stops
+                    // here and the failed directive is not counted.
+                    break 'outer;
                 }
             }
             b'c' => {
@@ -1893,6 +2149,12 @@ where
                     }
                 }
 
+                if read_count == 0 {
+                    // Matching failure or input failure before any
+                    // character: nothing is assigned and scanning stops
+                    // (C11 §7.21.6.2).
+                    break 'outer;
+                }
                 if let Some(ptr) = dst_ptr {
                     env.mem.write(ptr, b'\0');
                     log_dbg!(
@@ -1919,7 +2181,8 @@ where
 }
 
 fn sscanf(env: &mut Environment, src: ConstPtr<u8>, format: ConstPtr<u8>, args: DotDotDot) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "sscanf({:?} ({:?}), {:?} ({:?}), ...)",
@@ -1937,11 +2200,15 @@ fn swscanf(
     format: ConstPtr<wchar_t>,
     args: DotDotDot,
 ) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
-    // TODO: support other locales
+    // Only the "C" locale is supported, but apps sometimes request e.g.
+    // "UTF-8"; tolerate a mismatch rather than aborting the emulator.
     let ctype_locale = setlocale(env, LC_CTYPE, Ptr::null());
-    assert_eq!(env.mem.read(ctype_locale), b'C');
+    if env.mem.read(ctype_locale) != b'C' {
+        log!("non-'C' LC_CTYPE locale set; treating it as 'C'.");
+    }
 
     let w_string = env.mem.wcstr_at(ws);
     let w_format = env.mem.wcstr_at(format);
@@ -1963,7 +2230,8 @@ fn swscanf(
 }
 
 fn vsscanf(env: &mut Environment, src: ConstPtr<u8>, format: ConstPtr<u8>, arg: VaList) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "vsscanf({:?}, {:?} ({:?}), ...)",
@@ -1980,7 +2248,8 @@ fn fscanf(
     format: ConstPtr<u8>,
     args: DotDotDot,
 ) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "fscanf({:?}, {:?} ({:?}), ...)",
@@ -1991,8 +2260,13 @@ fn fscanf(
     let cc = getc(env, stream);
     if cc == EOF {
         return EOF;
-    } else {
-        assert_eq!(cc, ungetc(env, cc, stream));
+    }
+    // The pushback can fail on an unseekable stream (e.g. a pipe). Real
+    // libc scans via its internal buffer; we cannot, so report EOF rather
+    // than asserting (which would crash the host).
+    if ungetc(env, cc, stream) != cc {
+        log!("Warning: fscanf(): unable to push back first character; returning EOF.");
+        return EOF;
     }
 
     sscanf_common_generic(
@@ -2006,7 +2280,11 @@ fn fscanf(
             }
         },
         |env, file, c| {
-            assert_eq!(c as i32, ungetc(env, c as i32, file));
+            // Best effort: on an unseekable stream the pushback can fail;
+            // log and continue rather than panicking the host.
+            if ungetc(env, c as i32, file) != c as i32 {
+                log!("Warning: fscanf(): ungetc failed; input character lost.");
+            }
         },
         stream,
         format,
@@ -2020,7 +2298,8 @@ fn fprintf(
     format: ConstPtr<u8>,
     args: DotDotDot,
 ) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!("fprintf() implemented as a wrapper of vfprintf()");
 
@@ -2028,7 +2307,8 @@ fn fprintf(
 }
 
 fn vfprintf(env: &mut Environment, stream: MutPtr<FILE>, format: ConstPtr<u8>, arg: VaList) -> i32 {
-    // TODO: handle errno properly
+    // errno is cleared optimistically; ISO C does not define errno for
+    // the printf family, and error paths set it where it is meaningful.
     set_errno(env, 0);
     log_dbg!(
         "vfprintf({:?}, {:?} ({:?}), ...)",
@@ -2037,7 +2317,6 @@ fn vfprintf(env: &mut Environment, stream: MutPtr<FILE>, format: ConstPtr<u8>, a
         env.mem.cstr_at_utf8(format)
     );
     let res = printf_inner::<false, _>(env, |mem, idx| mem.read(format + idx), arg);
-    // TODO: I/O error handling
     match env.mem.read(stream).fd {
         STDIN_FILENO => {
             // vfprintf() to stdin is nonsense; real libc would EBADF. We
@@ -2047,8 +2326,18 @@ fn vfprintf(env: &mut Environment, stream: MutPtr<FILE>, format: ConstPtr<u8>, a
                 res.len()
             );
         }
-        STDOUT_FILENO => _ = std::io::stdout().write_all(&res),
-        STDERR_FILENO => _ = std::io::stderr().write_all(&res),
+        STDOUT_FILENO => {
+            if std::io::stdout().write_all(&res).is_err() {
+                log!("Warning: vfprintf(): writing to stdout failed; returning EOF.");
+                return EOF;
+            }
+        }
+        STDERR_FILENO => {
+            if std::io::stderr().write_all(&res).is_err() {
+                log!("Warning: vfprintf(): writing to stderr failed; returning EOF.");
+                return EOF;
+            }
+        }
         _ => {
             let buf = env.mem.alloc_and_write_cstr(res.as_slice());
             let result = fwrite(
@@ -2076,8 +2365,12 @@ fn vwprintf(env: &mut Environment, format: ConstPtr<wchar_t>, arg: VaList) -> i3
     set_errno(env, 0);
     // Используем 'C' локаль для корректной работы с широкими символами,
     // как это реализовано в vswprintf
+    // Only the "C" locale is supported, but apps sometimes request e.g.
+    // "UTF-8"; tolerate a mismatch rather than aborting the emulator.
     let ctype_locale = setlocale(env, LC_CTYPE, Ptr::null());
-    assert_eq!(env.mem.read(ctype_locale), b'C');
+    if env.mem.read(ctype_locale) != b'C' {
+        log!("non-'C' LC_CTYPE locale set; treating it as 'C'.");
+    }
 
     let wcstr_format = env.mem.wcstr_at(format);
     log_dbg!("vwprintf({:?} ({:?}), ...)", format, wcstr_format);
@@ -2096,7 +2389,12 @@ fn vwprintf(env: &mut Environment, format: ConstPtr<wchar_t>, arg: VaList) -> i3
         arg,
     );
     // Пишем результат напрямую в стандартный вывод (stdout)
-    let _ = std::io::stdout().write_all(&res);
+    // Real libc returns a negative value when writing to stdout fails;
+    // mirror that instead of ignoring the error.
+    if std::io::stdout().write_all(&res).is_err() {
+        log!("Warning: vwprintf(): writing to stdout failed; returning EOF.");
+        return EOF;
+    }
     res.len().try_into().unwrap()
 }
 
@@ -2139,6 +2437,7 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(fscanf(_, _, _)),
     export_c_func!(snprintf(_, _, _, _)),
     export_c_func!(vasprintf(_, _, _)),
+    export_c_func!(asprintf(_, _, _)),
     export_c_func!(vprintf(_, _)),
     export_c_func!(vsnprintf(_, _, _, _)),
     export_c_func!(__vsnprintf_chk(_, _, _, _, _, _)),
@@ -2161,8 +2460,9 @@ pub const FUNCTIONS: FunctionExports = &[
     // NSLog and NSLogv are exported from foundation::ns_log; not duplicated.
 ];
 
-// Helper function, not a part of printf family
-// TODO: write proper libc's isspace()
+// Helper function, not a part of printf family. Implements C-locale
+// `isspace()`: space, \t, \n, \v, \f, \r. (Rust's `is_ascii_whitespace()`
+// omits \v, so it is added explicitly below.)
 pub fn isspace(env: &mut Environment, src: ConstPtr<u8>) -> bool {
     let c = env.mem.read(src);
     isspace_inner(c)

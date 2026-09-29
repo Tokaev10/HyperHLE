@@ -173,6 +173,32 @@ fn CFStringConvertNSStringEncodingToEncoding(
     }
 }
 
+/// `CFStringRef CFStringConvertEncodingToIANACharSetName(CFStringEncoding)` —
+/// maps a CFStringEncoding to its canonical IANA charset name, or NULL when
+/// the encoding has no IANA equivalent. Games use this when building HTTP
+/// headers (e.g. `Content-Type: text/html; charset=...`).
+fn CFStringConvertEncodingToIANACharSetName(
+    env: &mut Environment,
+    encoding: CFStringEncoding,
+) -> CFStringRef {
+    let name: &'static str = match encoding {
+        kCFStringEncodingMacRoman => "macintosh",
+        kCFStringEncodingASCII => "us-ascii",
+        kCFStringEncodingUTF8 => "utf-8",
+        kCFStringEncodingUTF16 => "utf-16",
+        kCFStringEncodingUTF16BE => "utf-16be",
+        kCFStringEncodingUTF16LE => "utf-16le",
+        kCFStringEncodingUTF32 => "utf-32",
+        kCFStringEncodingUTF32BE => "utf-32be",
+        kCFStringEncodingUTF32LE => "utf-32le",
+        kCFStringEncodingISOLatin1 => "iso-8859-1",
+        kCFStringEncodingWindowsLatin1 => "windows-1252",
+        kCFStringEncodingNextStepLatin => "x-nextstep",
+        _ => return nil,
+    };
+    ns_string::get_static_str(env, name)
+}
+
 fn CFStringIsEncodingAvailable(_env: &mut Environment, encoding: CFStringEncoding) -> bool {
     // Most common encodings are available
     matches!(
@@ -2309,6 +2335,7 @@ pub const FUNCTIONS: FunctionExports = &[
     // Encoding
     export_c_func!(CFStringConvertEncodingToNSStringEncoding(_)),
     export_c_func!(CFStringConvertNSStringEncodingToEncoding(_)),
+    export_c_func!(CFStringConvertEncodingToIANACharSetName(_)),
     export_c_func!(CFStringIsEncodingAvailable(_)),
     export_c_func!(CFStringGetSystemEncoding()),
     export_c_func!(CFStringGetMaximumSizeForEncoding(_, _)),

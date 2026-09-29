@@ -1718,11 +1718,6 @@ impl Window {
             "Magnetometer detected: synthetic 3-axis Earth-field model (no host magnetic sensor)."
         );
 
-        // Resolve the WebView overlay bridge's JNI class and method IDs here:
-        // FindClass needs the app class loader, which is only reachable from
-        // this stack before guest code starts running on a coroutine stack.
-        #[cfg(target_os = "android")]
-        crate::android_web_view::populate_jni_cache();
 
         #[cfg(target_os = "macos")]
         let max_height = window.size().1;
@@ -3876,12 +3871,6 @@ pub fn open_url(env: &mut Environment, url: &str) -> Result<(), String> {
             return Err(format!(
                 "Android picker command failed with return code {result}"
             ));
-        }
-    }
-    #[cfg(target_os = "android")]
-    {
-        if crate::android_web_view::open_url_external(url) {
-            return Ok(());
         }
     }
     env.on_parent_stack_in_coroutine(|_, _| sdl2::url::open_url(url).map_err(|e| e.to_string()))

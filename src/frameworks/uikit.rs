@@ -12,7 +12,22 @@
 use crate::{msg, Environment};
 use std::time::Instant;
 
-use crate::dyld::HostConstant;
+use crate::dyld::{FunctionExports, HostConstant};
+use crate::export_c_func;
+
+/// `BOOL UIAccessibilityIsGuidedAccessEnabled(void)` — guided-access is a
+/// device-administration mode that cannot be enabled inside the emulator;
+/// apps use it to adjust behaviour and must get a plain `false`.
+/// `BOOL UIAccessibilityIsGuidedAccessEnabled(void)` — guided-access is a
+/// device-administration mode that cannot be enabled inside the emulator;
+/// apps use it to adjust behaviour and must get a plain `false`.
+fn UIAccessibilityIsGuidedAccessEnabled(_env: &mut Environment) -> bool {
+    false
+}
+
+const UI_ACCESSIBILITY_FUNCTIONS: FunctionExports = &[
+    export_c_func!(UIAccessibilityIsGuidedAccessEnabled()),
+];
 use crate::mem::{ConstVoidPtr, MutPtr};
 
 pub mod ui_accelerometer;
@@ -968,6 +983,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         CONSTANTS,
     ],
     function_exports: &[
+        UI_ACCESSIBILITY_FUNCTIONS,
         ui_application::FUNCTIONS,
         ui_geometry::FUNCTIONS,
         ui_graphics::FUNCTIONS,

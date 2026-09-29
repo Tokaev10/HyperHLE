@@ -2638,3 +2638,80 @@ pub fn class_getProperty(
     // Property not found in hierarchy — return NULL (spec-compliant).
     ConstVoidPtr::null()
 }
+/// `BOOL class_isMetaClass(Class cls)`
+///
+/// Per Apple's [Objective-C Runtime Reference](https://developer.apple.com/documentation/objectivec/1418629-class_ismetaclass):
+/// returns `YES` if `cls` is a metaclass, `NO` otherwise (including when
+/// `cls` is `Nil` or not a class at all).
+///
+/// Chrome's networking layer calls this during Objective-C runtime
+/// introspection.
+pub fn class_isMetaClass(env: &mut crate::Environment, cls: Class) -> bool {
+    if cls.is_null() {
+        return false;
+    }
+    if let Some(host_obj) = env.objc.get_host_object(cls) {
+        if let Some(class_obj) = host_obj.as_any().downcast_ref::<ClassHostObject>() {
+            return class_obj.is_metaclass;
+        }
+        if let Some(unimpl) = host_obj.as_any().downcast_ref::<UnimplementedClass>() {
+            return unimpl.is_metaclass;
+        }
+        if let Some(fake) = host_obj.as_any().downcast_ref::<FakeClass>() {
+            return fake.is_metaclass;
+        }
+    }
+    // Guest-defined class: read the class struct from guest memory and check
+    // the CLS_META flag in its class_rw_t data (flags bit 0x2, matching the
+    // legacy Objective-C runtime this project targets).
+    let class_t_size = std::mem::size_of::<class_t>() as GuestUSize;
+    if env
+        .mem
+        .get_bytes_fallible(cls.cast_const().cast(), class_t_size)
+        .is_none()
+    {
+        return false;
+    }
+    let class_struct: class_t = env.mem.read(cls.cast());
+    if class_struct.data.is_null() {
+        return false;
+    }
+    let rw_size = std::mem::size_of::<class_rw_t>() as GuestUSize;
+    if env
+        .mem
+        .get_bytes_fallible(class_struct.data.cast(), rw_size)
+        .is_none()
+    {
+        return false;
+    }
+    let rw: class_rw_t = env.mem.read(class_struct.data.cast());
+    (rw._flags & 0x2) != 0
+}
+
+/// stack pointer before the branch. IMPs that return structs via the sret
+/// convention are not handled (the sret pointer would need the same one-
+/// slot shift as `self`); no guest call site in practice combines
+/// `imp_implementationWithBlock` with a struct-returning signature.
+pub fn imp_implementationWithBlock(
+    env: &mut crate::Environment,
+    block: id,
+) -> crate::mem::ConstVoidPtr {
+    if block.to_bits() == 0 {
+        // `imp_implementationWithBlock(NULL)` is documented to crash the
+        // process; returning NULL is the closest non-fatal behaviour.
+        return crate::mem::ConstVoidPtr::from_bits(0);
+    }
+    let block_bits = block.to_bits();
+    let base: crate::mem::MutPtr<u32> = crate::mem::Ptr::from_bits(block_bits);
+    // Block literal layout (32-bit): isa @0, flags @4, reserved @8, invoke @12.
+    let invoke_bits: u32 = env.mem.read(base + 3);
+    let tramp: crate::mem::MutPtr<u32> = env.mem.alloc(32).cast();
+    env.mem.write(tramp + 0, 0xe92d_000f); // push {r0-r3}
+    env.mem.write(tramp + 1, 0xe59f_0008); // ldr  r0, [pc, #8]
+    env.mem.write(tramp + 2, 0xe59f_c008); // ldr  r12, [pc, #8]
+    env.mem.write(tramp + 3, 0xe8bd_001e); // pop  {r1-r4}
+    env.mem.write(tramp + 4, 0xe12f_ff1c); // bx   r12
+    env.mem.write(tramp + 5, block_bits); // literal: block literal
+    env.mem.write(tramp + 6, invoke_bits); // literal: invoke
+    tramp.cast().cast_const()
+}

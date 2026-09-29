@@ -51,7 +51,7 @@ pub use classes::{
     objc_registerClassPair, objc_release, objc_retain, objc_retainAutorelease,
     objc_retainAutoreleaseReturnValue, objc_retainAutoreleasedReturnValue, objc_retainBlock,
     objc_storeStrong, objc_unsafeClaimAutoreleasedReturnValue, object_getClass,
-    object_getClassName, object_getIndexedIvars, protocol_conformsToProtocol, protocol_getName,
+    object_getClassName, object_getIndexedIvars, imp_implementationWithBlock, class_isMetaClass, protocol_conformsToProtocol, protocol_getName,
     swift_getInitializedObjCClass, Class, ClassExports, ClassTemplate,
 };
 pub use messages::{
@@ -437,12 +437,14 @@ const FUNCTIONS: FunctionExports = &[
     export_c_func!(objc_alloc(_)),
     export_c_func!(objc_autorelease(_)),
     export_c_func!(objc_retainBlock(_)),
+    export_c_func!(imp_implementationWithBlock(_)),
     export_c_func!(objc_release(_)),
     export_c_func!(objc_setProperty_nonatomic(_, _, _, _)),
     export_c_func!(objc_exception_throw(_)),
     export_c_func!(objc_begin_catch(_)),
     export_c_func!(objc_end_catch(_)),
     export_c_func!(class_getSuperclass(_)),
+    export_c_func!(class_isMetaClass(_)),
     export_c_func!(class_getInstanceSize(_, _)),
     export_c_func!(class_getInstanceMethod(_, _)),
     export_c_func!(class_getClassMethod(_, _)),

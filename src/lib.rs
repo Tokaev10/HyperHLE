@@ -28,7 +28,6 @@
 mod log;
 mod a64_abi;
 mod android_media;
-mod android_web_view;
 mod env_flags;
 mod abi;
 mod arm64_runtime;
@@ -584,7 +583,7 @@ pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
     if options.network_access {
         log!("Network access: enabled by settings");
     } else {
-        log!("Network access: disabled by settings (auto-enables when a game requests it)");
+        log!("Network access: disabled by settings (guest network requests will fail until enabled with --network-access)");
     }
 
     if options.fps_limit.is_none() {

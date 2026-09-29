@@ -258,7 +258,7 @@ fn process_cpu_percent() -> Option<f32> {
             return Some(value);
         }
     }
-    let result = previous.take().and_then(|(old_process, old_time, _)| {
+    let result = previous.take().and_then(|(_, old_time, old_process)| {
         let wall = now.duration_since(old_time).as_nanos() as f32 / 100.0;
         let process = process_time.saturating_sub(old_process) as f32;
         (wall > 0.0).then(|| {
@@ -294,7 +294,7 @@ fn process_cpu_percent() -> Option<f32> {
             return Some(value);
         }
     }
-    let result = previous.take().and_then(|(old_process, old_time, _)| {
+    let result = previous.take().and_then(|(_, old_time, old_process)| {
         let wall = now.duration_since(old_time).as_nanos() as f32;
         let process = process_time.saturating_sub(old_process) as f32;
         (wall > 0.0).then(|| {

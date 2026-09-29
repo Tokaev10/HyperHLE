@@ -338,19 +338,18 @@ static ENVIRONMENT_INSTANCE_EXISTS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 impl Environment {
-    /// Ensures network access is enabled, auto-enabling it the first time a
-    /// guest API actually asks for the network even when the user left it
-    /// disabled by default. Returns whether network access is (now) enabled.
+    /// Reports whether network access is enabled. Network access NEVER
+    /// auto-enables: if the user left it off in the options, guest network
+    /// APIs fail gracefully until the user explicitly turns it on.
     pub fn ensure_network_access(&mut self, caller: &str) -> bool {
         if self.options.network_access {
             return true;
         }
-        self.options.network_access = true;
-        log!(
-            "Network access: auto-enabled on request from {} (was disabled by settings)",
+        log_once_fmt!(
+            "Network access: request from {} denied (disabled in settings); pass --network-access to enable",
             caller
         );
-        true
+        false
     }
 
     /// Loads the binary and sets up the emulator.

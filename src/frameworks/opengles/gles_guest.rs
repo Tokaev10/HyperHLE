@@ -5228,6 +5228,52 @@ fn glGetQueryObjectuiv(env: &mut Environment, id: GLuint, pname: GLenum, params:
     });
 }
 
+// EXT_occlusion_query_boolean / EXT_texture_storage aliases (same semantics
+// as their core GLES2 counterparts on the host drivers we support).
+fn glGenQueriesEXT(env: &mut Environment, n: GLsizei, ids: MutPtr<GLuint>) {
+    glGenQueries(env, n, ids)
+}
+
+fn glDeleteQueriesEXT(env: &mut Environment, n: GLsizei, ids: ConstPtr<GLuint>) {
+    glDeleteQueries(env, n, ids)
+}
+
+fn glIsQueryEXT(env: &mut Environment, id: GLuint) -> GLboolean {
+    glIsQuery(env, id)
+}
+
+fn glBeginQueryEXT(env: &mut Environment, target: GLenum, id: GLuint) {
+    glBeginQuery(env, target, id)
+}
+
+fn glEndQueryEXT(env: &mut Environment, target: GLenum) {
+    glEndQuery(env, target)
+}
+
+fn glGetQueryivEXT(env: &mut Environment, target: GLenum, pname: GLenum, params: MutPtr<GLint>) {
+    glGetQueryiv(env, target, pname, params)
+}
+
+fn glGetQueryObjectuivEXT(
+    env: &mut Environment,
+    id: GLuint,
+    pname: GLenum,
+    params: MutPtr<GLuint>,
+) {
+    glGetQueryObjectuiv(env, id, pname, params)
+}
+
+fn glTexStorage2DEXT(
+    env: &mut Environment,
+    target: GLenum,
+    levels: GLsizei,
+    internalformat: GLenum,
+    width: GLsizei,
+    height: GLsizei,
+) {
+    glTexStorage2D(env, target, levels, internalformat, width, height)
+}
+
 // -- Sampler objects --
 fn glGenSamplers(env: &mut Environment, count: GLsizei, samplers: MutPtr<GLuint>) {
     with_ctx_and_mem(env, |gles, mem| unsafe {
@@ -6407,6 +6453,14 @@ pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(glEndQuery(_)),
     export_c_func!(glGetQueryiv(_, _, _)),
     export_c_func!(glGetQueryObjectuiv(_, _, _)),
+    export_c_func!(glGenQueriesEXT(_, _)),
+    export_c_func!(glDeleteQueriesEXT(_, _)),
+    export_c_func!(glIsQueryEXT(_)),
+    export_c_func!(glBeginQueryEXT(_, _)),
+    export_c_func!(glEndQueryEXT(_)),
+    export_c_func!(glGetQueryivEXT(_, _, _)),
+    export_c_func!(glGetQueryObjectuivEXT(_, _, _)),
+    export_c_func!(glTexStorage2DEXT(_, _, _, _, _)),
     export_c_func!(glGenSamplers(_, _)),
     export_c_func!(glDeleteSamplers(_, _)),
     export_c_func!(glIsSampler(_)),
