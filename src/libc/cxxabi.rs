@@ -148,36 +148,6 @@ pub(crate) fn unwind_to_app_frame(env: &mut Environment) -> bool {
     false
 }
 
-fn terminate_current_thread_after_exception(env: &mut Environment, reason: &str) {
-    log!(
-        "Warning: terminating guest thread {} after unrecoverable C++ exception loop ({})",
-        env.current_thread,
-        reason
-    );
-    if env.current_thread == 0 {
-        // The MAIN thread's saved CPU state is now garbage (the bypass rewound
-        // it into the middle of a throwing frame). If the executor resumes it
-        // again it re-executes that garbage forever: every re-entry throws,
-        // every throw terminates, and the log fills with millions of repeated
-        // assertion lines while the CPU spins at 100%. Terraria 1.0 did
-        // exactly this (6.7M+ warnings, 694 MB log). Mark the environment so
-        // Environment::run() stops after this exit instead of re-entering.
-        env.main_thread_terminated = true;
-    }
-    let thread_exit = env.dyld.thread_exit_routine();
-    let regs = env.cpu.regs_mut();
-    regs[0] = 0;
-    regs[Cpu::LR] = thread_exit.addr_with_thumb_bit();
-    env.cpu.branch(thread_exit);
-}
-
-// === Exception-loop detection (shared) ===
-//
-// touchHLE's exception "bypass" can return control to a caller that
-// immediately re-throws (classic example: `operator new` in a loop that
-// keeps getting NULL from a refused huge `malloc`, throwing `bad_alloc`
-// every iteration — see P. Harvest, which spins on malloc(0x4420000c)).
-// Both the Itanium (`__cxa_throw`) and the SjLj (`_Unwind_SjLj_*`) entry
 // points funnel through here so neither can hang the emulator forever.
 //
 // Returns the number of consecutive throws that share the same `key`.
@@ -285,23 +255,22 @@ fn __cxa_throw(env: &mut Environment, exc: MutVoidPtr, tinfo: ConstVoidPtr, _dto
     }
     if count >= THROW_LOOP_LIMIT {
         log!(
-            "Warning: Exception loop detected: {} threw {} times in a row; \
-             terminating only the current guest thread instead of aborting the \
-             emulator.",
+            "Warning: Exception loop detected: {} threw {} times in a row. \
+             touchHLE's SjLj bypass is returning into a caller that re-throws \
+             every iteration. Returning to caller to break the loop; the \
+             guest will likely abort on its own shortly.",
             type_name,
             count
         );
-        terminate_current_thread_after_exception(env, &type_name);
         return;
     }
 
     if !unwind_to_app_frame(env) {
         log!(
             "Warning: Could not unwind past C++ exception ({}); no app-level \
-             frame on the stack; terminating only the current guest thread.",
+             frame on the stack. Returning to caller; guest will likely abort.",
             type_name
         );
-        terminate_current_thread_after_exception(env, &type_name);
     }
 }
 
@@ -309,10 +278,9 @@ fn __cxa_rethrow(env: &mut Environment) {
     log_once!("__cxa_rethrow — bypassing; repeated calls are suppressed");
     if !unwind_to_app_frame(env) {
         log!(
-            "Warning: Could not unwind past __cxa_rethrow; no app-level frame; \
-             terminating only the current guest thread."
+            "Warning: Could not unwind past __cxa_rethrow; no app-level frame. \
+             Returning to caller; guest will likely abort."
         );
-        terminate_current_thread_after_exception(env, "__cxa_rethrow");
     }
 }
 
@@ -738,19 +706,21 @@ fn _Unwind_SjLj_RaiseException(env: &mut Environment, _exc: MutVoidPtr) -> i32 {
     if count >= THROW_LOOP_LIMIT {
         log!(
             "Warning: SjLj exception loop detected (site={:#x} raised {} times \
-             in a row); terminating only the current guest thread.",
+             in a row). Returning _URC_FATAL_PHASE1_ERROR to break the loop; \
+             the guest will likely abort on its own shortly.",
             site,
             count
         );
-        terminate_current_thread_after_exception(env, &format!("site={site:#x}"));
-        return 0;
+        // _URC_FATAL_PHASE1_ERROR
+        return 3;
     }
     if !unwind_to_app_frame(env) {
         log!(
             "Warning: _Unwind_SjLj_RaiseException with no recoverable frame; \
-             terminating only the current guest thread."
+             returning _URC_FATAL_PHASE1_ERROR to caller."
         );
-        terminate_current_thread_after_exception(env, &format!("site={site:#x}"));
+        // _URC_FATAL_PHASE1_ERROR
+        return 3;
     }
     0
 }
@@ -761,9 +731,8 @@ fn _Unwind_SjLj_Resume(env: &mut Environment, _exc: MutVoidPtr) {
     if !unwind_to_app_frame(env) {
         log!(
             "Warning: _Unwind_SjLj_Resume with no recoverable frame; \
-             terminating only the current guest thread."
+             returning to caller. Guest will likely abort."
         );
-        terminate_current_thread_after_exception(env, "_Unwind_SjLj_Resume");
     }
 }
 
@@ -773,9 +742,9 @@ fn _Unwind_SjLj_Resume_or_Rethrow(env: &mut Environment, _exc: MutVoidPtr) -> i3
     if !unwind_to_app_frame(env) {
         log!(
             "Warning: _Unwind_SjLj_Resume_or_Rethrow with no recoverable frame; \
-             terminating only the current guest thread."
+             returning _URC_FATAL_PHASE2_ERROR."
         );
-        terminate_current_thread_after_exception(env, "_Unwind_SjLj_Resume_or_Rethrow");
+        return 2;
     }
     0
 }

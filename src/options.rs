@@ -609,7 +609,7 @@ impl Default for Options {
             arm64_backend: Arm64Backend::Interpreter,
             arm64_fallback: Arm64Fallback::Interpreter,
             llvmpipe_fallback: false,
-            metal_translator: cfg!(target_arch = "aarch64"),
+            metal_translator: false,
             gdb_listen_addrs: None,
             preferred_languages: None,
             headless: false,
@@ -633,7 +633,7 @@ impl Default for Options {
             dumping_options: Default::default(),
             dumping_file: crate::paths::user_data_base_path().join("DUMP.txt"),
             ignore_gl_errors: false,
-            trace_gl_errors: true,
+            trace_gl_errors: false,
             verbose_logging: false,
             shader_compatibility_fixes: true,
             fix_texture_min_filter: cfg!(target_os = "android"),
@@ -1396,11 +1396,8 @@ mod tests {
     }
 
     #[test]
-    fn metal_translator_defaults_to_the_arm64_compatibility_path() {
-        assert_eq!(
-            Options::default().metal_translator,
-            cfg!(target_arch = "aarch64")
-        );
+    fn metal_translator_defaults_to_off() {
+        assert!(!Options::default().metal_translator);
     }
 
     #[test]

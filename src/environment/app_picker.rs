@@ -931,7 +931,7 @@ fn show_app_picker_gui(
         .unwrap_or((320, 568));
     options.host_screen_size = Some(picker_canvas_size);
     options.scale_hack = 3.0;
-    log!(
+    log_dbg!(
         "App picker: using fixed {}x{} logical canvas at 3x internal resolution, preserving host aspect ratio.",
         picker_canvas_size.0,
         picker_canvas_size.1
@@ -976,7 +976,7 @@ fn app_picker_inner(
         height: app_frame_height,
     } = app_frame.size;
     let ui_scale = picker_ui_scale(app_frame.size);
-    log!(
+    log_dbg!(
         "App picker layout: logical frame {:.0}x{:.0}, UI scale {:.2}",
         app_frame_width,
         app_frame_height,
@@ -1056,7 +1056,7 @@ fn app_picker_inner(
     }
     if !have_wallpaper {
         let CGSize { width, height } = app_frame.size;
-        log!(
+        log_dbg!(
             "No wallpaper found; filename can be one of: {}; ideal size is {}×{} pixels",
             paths::WALLPAPER_FILES.join(", "),
             width,
@@ -1220,7 +1220,7 @@ fn app_picker_inner(
     let mut quick_options_arm64_backend = crate::options::Arm64Backend::Interpreter;
     let mut quick_options_arm64_fallback = crate::options::Arm64Fallback::Interpreter;
     let mut quick_options_llvmpipe_fallback = false;
-    let mut quick_options_metal_translator = cfg!(target_arch = "aarch64");
+    let mut quick_options_metal_translator = false;
     let mut quick_options_software_rendering = false;
     let mut quick_options_custom_driver: Option<PathBuf> = None;
     let mut quick_options_anisotropic_filtering = 1u8;
