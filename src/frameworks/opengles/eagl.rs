@@ -144,14 +144,7 @@ pub(super) struct EAGLContextHostObject {
     pub(super) guest_bound_attribs: Rc<RefCell<HashSet<GLuint>>>,
     fps_counter: Option<FpsCounter>,
     next_frame_due: Option<Instant>,
-    /// Guest-visible mirror pointers for glMapBufferOES / glMapBufferRange,
-    /// keyed by buffer object name. The raw pointer is the host driver
-    /// mapping when one exists (read-mapped ranges). `host_mapped` records
-    /// whether a real driver mapping is still live, and therefore whether
-    /// glUnmapBufferOES must unmap it at driver level. Write-only OES maps
-    /// are pure guest mirrors (no driver map) so the driver can never reject
-    /// the staging pattern with GL_INVALID_OPERATION.
-    pub mapped_buffers: HashMap<GLuint, (MutPtr<GLvoid>, *mut GLvoid, bool)>,
+    pub mapped_buffers: HashMap<GLuint, (MutPtr<GLvoid>, *mut GLvoid)>,
 }
 impl HostObject for EAGLContextHostObject {}
 
@@ -311,7 +304,7 @@ pub const CLASSES: ClassExports = objc_classes! {
 
 - (())dealloc {
     let host_obj = env.objc.borrow_mut::<EAGLContextHostObject>(this);
-    for &(guest_buf, _host_buf, _host_mapped) in host_obj.mapped_buffers.values() {
+    for &(guest_buf, _host_buf) in host_obj.mapped_buffers.values() {
         env.mem.free(guest_buf);
     }
     if Rc::strong_count(&host_obj.renderbuffer_drawable_bindings) == 1 {
@@ -666,7 +659,7 @@ pub const CLASSES: ClassExports = objc_classes! {
             .borrow_mut::<EAGLContextHostObject>(this)
             .fps_counter
             .get_or_insert_with(FpsCounter::start)
-            .count_frame(format_args!("EAGLContext {this:?}"));
+            .count_frame(format_args!("EAGLContext {this:?}"), true);
     }
 
     let fullscreen_layer = find_fullscreen_eagl_layer(env);
@@ -1540,7 +1533,7 @@ unsafe fn present_renderbuffer_es2_translator(
     if scissor_was_enabled {
         gles.Enable(gles2::SCISSOR_TEST);
     }
-    crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+    crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "CA draw pass (post-scissor)");
 }
 
 /// Shader-based variant of the renderbuffer presenter, used when the
@@ -1748,7 +1741,7 @@ unsafe fn present_renderbuffer_es2(
             );
             // Drain any additional queued errors so they don't leak into the
             // app's next frame.
-            crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+            while gles.GetError() != 0 {}
         }
     }
     probe_present_pixels(gles, "es2", width, height);
@@ -1936,7 +1929,7 @@ unsafe fn present_renderbuffer_es2(
     // `OpenGLES error 0x0502 in .../GlesHelper.mm` flood seen on Unity titles.
     // Drain the queue so the guest only ever observes errors it actually
     // caused, matching the real-device contract.
-    crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+    crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "CA draw pass (post-draw)");
 }
 
 #[derive(Copy, Clone)]
@@ -2263,14 +2256,14 @@ unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_tok
                 driver
             );
         }
-        crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+        crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "resolve renderbuffer");
     }
 
     // Drain anything the guest might have left in the queue so we can
     // attribute new errors below to our own code, not to whatever
     // happened before presentRenderbuffer:.
     if trace_gl_errors {
-        crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+        crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "present (pre-drain)");
     }
     {
         static SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2532,7 +2525,7 @@ unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_tok
             }
             // Drain any GL error this probe may have generated; it must
             // not leak into the guest-visible error queue.
-            crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+            crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "forensic probe");
             // Snapshot the guest's current GL state — this tells us how
             // the *app* was set up at presentRenderbuffer entry, which
             // is the moment the previous frame's draws were issued.
@@ -2545,24 +2538,24 @@ unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_tok
             // driver that rejects an enum just shows up as 0 in the
             // log without poisoning the queue for the next query.
             let qb = |gles: &mut dyn GLES, name: GLenum| -> GLboolean {
-                crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+                while gles.GetError() != 0 {}
                 let mut v: GLboolean = gles11::FALSE;
                 gles.GetBooleanv(name, &mut v);
-                crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+                while gles.GetError() != 0 {}
                 v
             };
             let qi = |gles: &mut dyn GLES, name: GLenum| -> GLint {
-                crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+                while gles.GetError() != 0 {}
                 let mut v: GLint = 0;
                 gles.GetIntegerv(name, &mut v);
-                crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+                while gles.GetError() != 0 {}
                 v
             };
             let qf4 = |gles: &mut dyn GLES, name: GLenum| -> [GLfloat; 4] {
-                crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+                while gles.GetError() != 0 {}
                 let mut v: [GLfloat; 4] = [0.0; 4];
                 gles.GetFloatv(name, v.as_mut_ptr());
-                crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+                while gles.GetError() != 0 {}
                 v
             };
             let blend_on = qb(gles, gles11::BLEND);
@@ -2788,7 +2781,7 @@ unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_tok
             }
             // Drain anything that leaked in from earlier so we can attribute
             // a fresh error to *this* cap.
-            crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+            while gles.GetError() != 0 {}
             let mut value: GLboolean = gles11::FALSE;
             gles.GetBooleanv(name, &mut value);
             let mut probe_failed = false;
@@ -2807,7 +2800,7 @@ unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_tok
             gles.Disable(name);
             // Disable on a valid cap shouldn't error, but a few drivers are
             // looser on Get than on Enable/Disable; drain to be safe.
-            crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+            while gles.GetError() != 0 {}
         }
         if log_rejects && !rejected_caps.is_empty() {
             let names: Vec<String> = rejected_caps
@@ -3098,7 +3091,7 @@ unsafe fn present_renderbuffer(env: &mut Environment, _drawable: id, context_tok
         // Drain any further pending errors (GL keeps them queued one at
         // a time per error code; spec says implementations may keep an
         // unbounded number).
-        crate::frameworks::opengles::gles_guest::drain_gl_errors_logged(gles, "swallow_internal_gl_errors");
+        while gles.GetError() != 0 {}
     }
 }
 

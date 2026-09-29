@@ -51,7 +51,12 @@ impl FpsCounter {
         }
     }
 
-    pub fn count_frame(&mut self, label: std::fmt::Arguments<'_>) {
+    /// `hud` marks the counter that reflects the game's actual render rate.
+    /// Only that counter feeds the on-screen HUD: the Core Animation
+    /// compositor can run at hundreds of FPS when the guest is idle, and
+    /// letting both counters write the HUD made the displayed value flip
+    /// between the compositor rate and the render rate every second.
+    pub fn count_frame(&mut self, label: std::fmt::Arguments<'_>, hud: bool) {
         self.frames += 1;
         let now = Instant::now();
         let duration = now - self.time;
@@ -59,14 +64,7 @@ impl FpsCounter {
             self.time = now;
             let fps = std::mem::take(&mut self.frames) as f32 / duration.as_secs_f32();
             echo!("touchHLE: {} FPS: {:.2}", label, fps);
-            // Update global text cache for on-screen overlay if enabled via
-            // environment variable or the runtime flag.
-            let onscreen_env = std::env::var_os("TOUCHHLE_ONSCREEN_FPS").is_some();
-            let onscreen_runtime = ONSCREEN_FPS_ENABLED
-                .get()
-                .map(|b| b.load(Ordering::SeqCst))
-                .unwrap_or(false);
-            if onscreen_env || onscreen_runtime {
+            if hud {
                 HUD_FPS_TENTHS.store((fps * 10.0).round() as u64, Ordering::Relaxed);
                 refresh_hud_metrics();
             }
@@ -148,7 +146,7 @@ fn update_hud_text() {
 fn process_cpu_percent() -> Option<f32> {
     use std::time::Instant;
 
-    static SAMPLE: OnceLock<Mutex<Option<(u64, Instant)>>> = OnceLock::new();
+    static SAMPLE: OnceLock<Mutex<Option<(f32, Instant, u64)>>> = OnceLock::new();
 
     fn process_time_ns() -> Option<u64> {
         let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
@@ -187,9 +185,19 @@ fn process_cpu_percent() -> Option<f32> {
     let now = Instant::now();
     let mutex = SAMPLE.get_or_init(|| Mutex::new(None));
     let mut previous = mutex.lock().ok()?;
+    // The sampler is called every frame, but the kernel reports CPU time at
+    // clock-tick granularity. Sampling on every call produced wild readings
+    // (one tick in a 2 ms window reads as 50%+ of a core). Cache the value
+    // and recompute at most four times per second.
+    const MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+    if let Some((value, sampled_at, _)) = *previous {
+        if now.duration_since(sampled_at) < MIN_SAMPLE_INTERVAL {
+            return Some(value);
+        }
+    }
     let result = previous
         .take()
-        .map(|(old_process, old_time)| {
+        .map(|(_cached_value, old_time, old_process)| {
             let wall_ns = now.duration_since(old_time).as_nanos() as f32;
             let process_ns = process_time.saturating_sub(old_process) as f32;
             let cores = std::thread::available_parallelism().map_or(1, |value| value.get()) as f32;
@@ -200,7 +208,7 @@ fn process_cpu_percent() -> Option<f32> {
             }
         })
         .unwrap_or(0.0);
-    *previous = Some((process_time, now));
+    *previous = Some((result, now, process_time));
     Some(result)
 }
 
@@ -210,7 +218,7 @@ fn process_cpu_percent() -> Option<f32> {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
-    static SAMPLE: OnceLock<Mutex<Option<(u64, Instant)>>> = OnceLock::new();
+    static SAMPLE: OnceLock<Mutex<Option<(f32, Instant, u64)>>> = OnceLock::new();
     let mut creation = FILETIME {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
@@ -244,7 +252,13 @@ fn process_cpu_percent() -> Option<f32> {
     let now = Instant::now();
     let mutex = SAMPLE.get_or_init(|| Mutex::new(None));
     let mut previous = mutex.lock().ok()?;
-    let result = previous.take().and_then(|(old_process, old_time)| {
+    const MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+    if let Some((value, sampled_at, _)) = *previous {
+        if now.duration_since(sampled_at) < MIN_SAMPLE_INTERVAL {
+            return Some(value);
+        }
+    }
+    let result = previous.take().and_then(|(old_process, old_time, _)| {
         let wall = now.duration_since(old_time).as_nanos() as f32 / 100.0;
         let process = process_time.saturating_sub(old_process) as f32;
         (wall > 0.0).then(|| {
@@ -252,7 +266,7 @@ fn process_cpu_percent() -> Option<f32> {
             (process / wall * 100.0 / cores).clamp(0.0, 100.0)
         })
     });
-    *previous = Some((process_time, now));
+    *previous = Some((result.unwrap_or(0.0), now, process_time));
     result
 }
 
@@ -260,7 +274,7 @@ fn process_cpu_percent() -> Option<f32> {
 fn process_cpu_percent() -> Option<f32> {
     use std::time::Instant;
 
-    static SAMPLE: OnceLock<Mutex<Option<(u64, Instant)>>> = OnceLock::new();
+    static SAMPLE: OnceLock<Mutex<Option<(f32, Instant, u64)>>> = OnceLock::new();
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
         return None;
@@ -274,7 +288,13 @@ fn process_cpu_percent() -> Option<f32> {
     let now = Instant::now();
     let mutex = SAMPLE.get_or_init(|| Mutex::new(None));
     let mut previous = mutex.lock().ok()?;
-    let result = previous.take().and_then(|(old_process, old_time)| {
+    const MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
+    if let Some((value, sampled_at, _)) = *previous {
+        if now.duration_since(sampled_at) < MIN_SAMPLE_INTERVAL {
+            return Some(value);
+        }
+    }
+    let result = previous.take().and_then(|(old_process, old_time, _)| {
         let wall = now.duration_since(old_time).as_nanos() as f32;
         let process = process_time.saturating_sub(old_process) as f32;
         (wall > 0.0).then(|| {
@@ -282,7 +302,7 @@ fn process_cpu_percent() -> Option<f32> {
             (process / wall * 100.0 / cores).clamp(0.0, 100.0)
         })
     });
-    *previous = Some((process_time, now));
+    *previous = Some((result.unwrap_or(0.0), now, process_time));
     result
 }
 

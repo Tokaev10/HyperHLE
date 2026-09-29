@@ -3447,41 +3447,42 @@ fn glMapBufferOES(env: &mut Environment, target: GLenum, access: GLenum) -> MutP
     assert!(matches!(target, ARRAY_BUFFER | ELEMENT_ARRAY_BUFFER));
     assert!(access == WRITE_ONLY_OES);
     let buffer_object_name = _get_currently_bound_buffer_object_name(env, target);
-    // Pure guest-mirror mapping: the driver is NEVER asked to map the
-    // buffer. The old implementation mapped at driver level and then had to
-    // unwind the intentional double-map / unbalanced-unmap patterns these
-    // apps produce, leaking GL_INVALID_OPERATION (0x502) into the driver
-    // queue on every staging round-trip. Because access is always
-    // WRITE_ONLY_OES (asserted above), the initial contents are irrelevant
-    // and the driver never needs to see the mapping at all: the mirror
-    // lives guest-side and is copied back with glBufferSubData on unmap.
-    let buffer_size = _get_buffer_size(env, target) as u32;
-    let guest_buffer: MutVoidPtr = env.mem.alloc(buffer_size).cast();
-    unsafe {
-        env.mem
-            .bytes_at_mut(guest_buffer.cast(), buffer_size)
-            .fill(0);
-    }
-    let Some(current_ctx) = *env
-        .framework_state
-        .opengles
-        .current_ctx_for_thread(env.current_thread)
-    else {
-        // glMapBufferOES requires a current context (Apple: "An
-        // EAGLContext must be current on the thread before any GL
-        // calls"). Without one, free the temporary guest buffer and
-        // return NULL, matching the GL spec.
-        env.mem.free(guest_buffer);
-        return nil.cast();
-    };
-    {
+    let host_buffer = with_ctx_and_mem_no_skip(env, |gles, _mem| unsafe {
+        gles.MapBufferOES(target, access)
+    });
+    if host_buffer.is_null() {
+        nil.cast()
+    } else {
+        let buffer_size = _get_buffer_size(env, target) as u32;
+        let guest_buffer: MutVoidPtr = env.mem.alloc(buffer_size).cast();
+        unsafe {
+            env.mem
+                .bytes_at_mut(guest_buffer.cast(), buffer_size)
+                .copy_from_slice(from_raw_parts(host_buffer as *mut u8, buffer_size as usize));
+        }
+        let Some(current_ctx) = *env
+            .framework_state
+            .opengles
+            .current_ctx_for_thread(env.current_thread)
+        else {
+            // glMapBufferOES requires a current context (Apple: "An
+            // EAGLContext must be current on the thread before any GL
+            // calls"). Without one, free the temporary guest buffer we
+            // just allocated and return NULL, matching the GL spec which
+            // says glMapBufferOES returns NULL on failure.
+            env.mem.free(guest_buffer);
+            return nil.cast();
+        };
         let current_ctx_host_object = env.objc.borrow_mut::<EAGLContextHostObject>(current_ctx);
-        // Per the GL_OES_mapbuffer spec, mapping an already-mapped buffer is
-        // GL_INVALID_OPERATION and returns NULL. Some apps (e.g. ZAS)
-        // accidentally re-map without unmapping first. Apple is lenient, so
-        // we replace the stale guest mirror and carry on. No driver call is
-        // involved, so no driver error can leak.
-        if let Some((stale_guest_buffer, _stale_host, _host_mapped)) = current_ctx_host_object
+        // Per the GL_OES_mapbuffer spec, calling glMapBufferOES while a
+        // buffer is already mapped is a GL_INVALID_OPERATION and returns
+        // NULL. Some apps (e.g. ZAS) accidentally re-map without unmapping
+        // first; the previous host mapping is still owned by the GL
+        // driver, so we cannot just drop it without unmapping. To stay
+        // close to Apple's lenient behaviour, we unmap the stale mapping
+        // (freeing the previous guest mirror) and install the new one so
+        // the app can continue uploading data instead of crashing.
+        if let Some((stale_guest_buffer, _stale_host_buffer)) = current_ctx_host_object
             .mapped_buffers
             .remove(&buffer_object_name)
         {
@@ -3491,12 +3492,23 @@ fn glMapBufferOES(env: &mut Environment, target: GLenum, access: GLenum) -> MutP
                 buffer_object_name
             );
             env.mem.free(stale_guest_buffer);
+            // Issue a real glUnmapBufferOES so the driver releases its
+            // own mapping of the buffer that we just dropped.
+            with_ctx_and_mem(env, |gles, _mem| unsafe {
+                gles.UnmapBufferOES(target);
+            });
+            // Re-borrow because with_ctx_and_mem dropped our reference.
+            let current_ctx_host_object = env.objc.borrow_mut::<EAGLContextHostObject>(current_ctx);
+            current_ctx_host_object
+                .mapped_buffers
+                .insert(buffer_object_name, (guest_buffer, host_buffer));
+        } else {
+            current_ctx_host_object
+                .mapped_buffers
+                .insert(buffer_object_name, (guest_buffer, host_buffer));
         }
-        current_ctx_host_object
-            .mapped_buffers
-            .insert(buffer_object_name, (guest_buffer, std::ptr::null_mut(), false));
+        guest_buffer
     }
-    guest_buffer
 }
 fn glUnmapBufferOES(env: &mut Environment, target: GLenum) -> GLboolean {
     let buffer_object_name = _get_currently_bound_buffer_object_name(env, target);
@@ -3505,20 +3517,15 @@ fn glUnmapBufferOES(env: &mut Environment, target: GLenum) -> GLboolean {
         .opengles
         .current_ctx_for_thread(env.current_thread);
     let Some(current_ctx) = current_ctx else {
-        return gles11::TRUE;
+        return gles11::FALSE;
     };
     let mapping = env
         .objc
         .borrow_mut::<EAGLContextHostObject>(*current_ctx)
         .mapped_buffers
         .remove(&buffer_object_name);
-    let Some((guest_buffer, host_buffer, host_mapped)) = mapping else {
-        // Unbalanced unmap (the app unmapped more times than it mapped, or
-        // re-bound a different buffer in between). With the guest-mirror
-        // staging emulation no driver mapping is outstanding, so there is
-        // nothing to undo and no driver error to drain: report success and
-        // carry on, Apple-style.
-        return gles11::TRUE;
+    let Some((guest_buffer, host_buffer)) = mapping else {
+        return gles11::FALSE;
     };
     let buffer_size = _get_buffer_size(env, target) as u32;
     unsafe {
@@ -3528,67 +3535,7 @@ fn glUnmapBufferOES(env: &mut Environment, target: GLenum) -> GLboolean {
         );
     }
     env.mem.free(guest_buffer);
-    if host_mapped {
-        // Read-mapped range: the app wrote through the real driver mapping,
-        // so only the driver-level unmap is needed.
-        with_ctx_and_mem(env, |gles, _mem| unsafe {
-            let result = gles.UnmapBufferOES(target);
-            let err = gles.GetError();
-            if err != 0 {
-                log!(
-                    "Warning: glUnmapBufferOES: driver returned {:#x} on unmap of target {:#x}",
-                    err,
-                    target
-                );
-            }
-            result
-        })
-    } else {
-        // Guest-mirror staging (write-only map): push the mirror into the
-        // driver buffer with glBufferSubData. No driver map/unmap pair ever
-        // existed, so the driver can never reject the intentional
-        // double-map / unbalanced-unmap staging pattern these apps use
-        // (BioShock) with GL_INVALID_OPERATION. This fixes 0x502 at the
-        // source instead of draining it silently.
-        //
-        // Copy at most what the guest mirror actually holds. The mirror was
-        // allocated with `buffer_size` at map time, but a game can re-bind
-        // a different, larger buffer between map and unmap (BioShock does
-        // this while rebuilding its staging pool); _get_buffer_size then
-        // reports the new buffer's size and the old code read past the end
-        // of the mirror, panicking in copy_from_slice. Clamp to the real
-        // allocation so the flush stays in bounds whatever the app does.
-        with_ctx_and_mem(env, |gles, mem| unsafe {
-            let full = mem.bytes_at(guest_buffer.cast(), buffer_size);
-            let bytes = if full.len() == buffer_size as usize {
-                full
-            } else {
-                log!(
-                    "Warning: glUnmapBufferOES: mirror only holds {} of {} bytes; flushing the prefix",
-                    full.len(),
-                    buffer_size
-                );
-                &full[..full.len().min(buffer_size as usize)]
-            };
-            gles.BufferSubData(
-                target,
-                0,
-                bytes.len() as HostGLsizeiptr,
-                bytes.as_ptr().cast(),
-            );
-            let err = gles.GetError();
-            if err != 0 {
-                log!(
-                    "Warning: glUnmapBufferOES: glBufferSubData of {} bytes returned {:#x} on target {:#x}",
-                    bytes.len(),
-                    err,
-                    target
-                );
-                return gles11::FALSE;
-            }
-            gles11::TRUE
-        })
-    }
+    with_ctx_and_mem(env, |gles, _mem| unsafe { gles.UnmapBufferOES(target) })
 }
 
 // =====================================================================
@@ -4781,38 +4728,11 @@ fn glMapBufferRange(
             access,
         )
     });
-    // Write-only mappings (the common case) are emulated with a pure guest
-    // mirror: no driver mapping is created, so the driver can never reject
-    // the map/unmap dance with GL_INVALID_OPERATION. Only read mappings
-    // need a real driver mapping (the app must see driver-side contents).
-    // Entries are keyed by the currently bound buffer OBJECT NAME (not the
-    // target enum) so glUnmapBufferOES — which looks entries up by name —
-    // finds them; the old target-keyed insert silently lost the copy-back
-    // for every buffer whose name differed from the target constant.
-    let map_read = access & 0x0001 != 0; // GL_MAP_READ_BIT
-    if !map_read {
-        if length == 0 {
-            return Ptr::null();
-        }
-        let guest_buf: MutPtr<GLvoid> = env.mem.alloc(length as GuestUSize).cast();
-        unsafe {
-            env.mem
-                .bytes_at_mut(guest_buf.cast(), length as GuestUSize)
-                .fill(0);
-        }
-        let buffer_object_name = _get_currently_bound_buffer_object_name(env, target);
-        let current_ctx: Option<crate::objc::id> = *env
-            .framework_state
-            .opengles
-            .current_ctx_for_thread(env.current_thread);
-        if let Some(ctx) = current_ctx {
-            let host_obj = env.objc.borrow_mut::<EAGLContextHostObject>(ctx);
-            host_obj
-                .mapped_buffers
-                .insert(buffer_object_name, (guest_buf, std::ptr::null_mut(), false));
-        }
-        return guest_buf.cast();
-    }
+    // The host pointer cannot be observed by the guest directly. EAGL
+    // tracks pending mappings in `EAGLContextHostObject::mapped_buffers`;
+    // the matching `glUnmapBuffer` consults that table. Allocate a guest
+    // buffer of `length` bytes, copy the contents from the host pointer,
+    // and remember the pairing.
     if host_ptr.is_null() || length == 0 {
         return Ptr::null();
     }
@@ -4822,7 +4742,6 @@ fn glMapBufferRange(
         let guest_slice = env.mem.bytes_at_mut(guest_buf.cast(), length as GuestUSize);
         guest_slice.copy_from_slice(host_slice);
     }
-    let buffer_object_name = _get_currently_bound_buffer_object_name(env, target);
     let current_ctx: Option<crate::objc::id> = *env
         .framework_state
         .opengles
@@ -4831,18 +4750,9 @@ fn glMapBufferRange(
         let host_obj = env.objc.borrow_mut::<EAGLContextHostObject>(ctx);
         host_obj
             .mapped_buffers
-            .insert(buffer_object_name, (guest_buf, host_ptr, true));
+            .insert(target, (guest_buf, host_ptr));
     }
     guest_buf.cast()
-}
-
-/// Actual size of the guest allocation backing a mirror buffer. Returns 0
-/// for unknown pointers so callers can clamp defensively.
-fn guest_slice_len(env: &Environment, guest_buf: MutVoidPtr) -> GuestUSize {
-    if guest_buf.is_null() {
-        return 0;
-    }
-    env.mem.malloc_size(guest_buf.cast_const())
 }
 
 fn glFlushMappedBufferRange(
@@ -4851,115 +4761,35 @@ fn glFlushMappedBufferRange(
     offset: GuestGLintptr,
     length: GuestGLsizeiptr,
 ) {
-    // Push the flushed slice of the guest mirror into the driver buffer.
-    // Guest-mirror entries (write-only maps) go through glBufferSubData;
-    // driver-mapped entries (read maps) are written through the raw host
-    // pointer, as before. Entries are keyed by buffer object name now.
-    let buffer_object_name = _get_currently_bound_buffer_object_name(env, target);
+    // Copy the relevant slice of the guest-visible buffer back to the
+    // host-mapped buffer so the driver sees the writes.
     let current_ctx: Option<crate::objc::id> = *env
         .framework_state
         .opengles
         .current_ctx_for_thread(env.current_thread);
-    let mut host_mapped = false;
     if let Some(ctx) = current_ctx {
         let mapping = env
             .objc
             .borrow::<EAGLContextHostObject>(ctx)
             .mapped_buffers
-            .get(&buffer_object_name)
+            .get(&target)
             .copied();
-        if let Some((guest_buf, host_ptr, is_host_mapped)) = mapping {
-            host_mapped = is_host_mapped;
-            // mem::bytes_at returns a SHORTENED stub-page slice when the
-            // requested range exceeds the guest allocation, so the flush
-            // length must be clamped to what is actually available in the
-            // mirror. BioShock flushes ranges that straddle the end of its
-            // staging allocation; an unclamped copy_from_slice here panics
-            // with a length mismatch and an unclamped BufferSubData would
-            // read past the slice into unrelated host memory.
-            // Clamp offset into the mirror: a negative or oversized offset
-            // must never produce an out-of-range slice or a host-pointer
-            // underflow (BioShock has flushed both shapes).
-            let mirror_len = guest_slice_len(env, guest_buf);
-            let offset_u = if offset < 0 {
-                log!(
-                    "Warning: glFlushMappedBufferRange: negative offset {offset} \
-                     clamped to 0 (target {target:#x})"
+        if let Some((guest_buf, host_ptr)) = mapping {
+            let guest_slice = env
+                .mem
+                .bytes_at(guest_buf.cast(), (offset + length) as GuestUSize);
+            unsafe {
+                let host_slice = std::slice::from_raw_parts_mut(
+                    (host_ptr as *mut u8).add(offset as usize),
+                    length as usize,
                 );
-                0u32
-            } else {
-                offset as GuestUSize
-            };
-            if offset_u >= mirror_len {
-                return;
-            }
-            let available = mirror_len - offset_u;
-            let flush_len = (length as GuestUSize).min(available);
-            if flush_len < length as GuestUSize {
-                log!(
-                    "Warning: glFlushMappedBufferRange: requested {} bytes at \
-                     offset {offset_u} but the guest mirror only has {available} \
-                     available; clamping (target {target:#x})",
-                    length
-                );
-            }
-            if flush_len == 0 {
-                return;
-            }
-            let guest_slice = env.mem.bytes_at(
-                guest_buf.cast(),
-                offset_u.saturating_add(flush_len),
-            );
-            if is_host_mapped {
-                unsafe {
-                    // bytes_at may return a shorter slice than requested
-                    // (stub-page clamp), so derive the copy length from the
-                    // slice we actually got rather than assuming flush_len.
-                    let flush_slice = &guest_slice[offset_u as usize..];
-                    let copy_len = flush_slice.len().min(flush_len as usize);
-                    if copy_len < flush_len as usize {
-                        log!(
-                            "Warning: glFlushMappedBufferRange: mirror slice                              shortened to {copy_len} of {flush_len} bytes;                              clamping copy (target {target:#x})"
-                        );
-                    }
-                    let host_slice = std::slice::from_raw_parts_mut(
-                        (host_ptr as *mut u8).add(offset_u as usize),
-                        copy_len,
-                    );
-                    host_slice.copy_from_slice(&flush_slice[..copy_len]);
-                }
-            } else {
-                with_ctx_and_mem(env, |gles, mem| unsafe {
-                    let bytes = mem.bytes_at(
-                        Ptr::<u8, true>::from_bits(
-                            guest_buf.cast::<u8>().to_bits() + offset_u,
-                        ),
-                        flush_len,
-                    );
-                    gles.BufferSubData(
-                        target,
-                        offset_u as HostGLintptr,
-                        bytes.len() as HostGLsizeiptr,
-                        bytes.as_ptr().cast(),
-                    );
-                    let err = gles.GetError();
-                    if err != 0 {
-                        log!(
-                            "Warning: glFlushMappedBufferRange: glBufferSubData of {} bytes \
-                             at offset {offset_u} returned {err:#x} on target {target:#x}",
-                            length
-                        );
-                    }
-                });
-                return;
+                host_slice.copy_from_slice(&guest_slice[offset as usize..]);
             }
         }
     }
-    if host_mapped {
-        with_ctx_and_mem(env, |gles, _mem| unsafe {
-            gles.FlushMappedBufferRange(target, offset as HostGLintptr, length as HostGLsizeiptr)
-        });
-    }
+    with_ctx_and_mem(env, |gles, _mem| unsafe {
+        gles.FlushMappedBufferRange(target, offset as HostGLintptr, length as HostGLsizeiptr)
+    });
 }
 
 fn glCopyBufferSubData(

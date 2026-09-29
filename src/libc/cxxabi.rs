@@ -154,6 +154,16 @@ fn terminate_current_thread_after_exception(env: &mut Environment, reason: &str)
         env.current_thread,
         reason
     );
+    if env.current_thread == 0 {
+        // The MAIN thread's saved CPU state is now garbage (the bypass rewound
+        // it into the middle of a throwing frame). If the executor resumes it
+        // again it re-executes that garbage forever: every re-entry throws,
+        // every throw terminates, and the log fills with millions of repeated
+        // assertion lines while the CPU spins at 100%. Terraria 1.0 did
+        // exactly this (6.7M+ warnings, 694 MB log). Mark the environment so
+        // Environment::run() stops after this exit instead of re-entering.
+        env.main_thread_terminated = true;
+    }
     let thread_exit = env.dyld.thread_exit_routine();
     let regs = env.cpu.regs_mut();
     regs[0] = 0;

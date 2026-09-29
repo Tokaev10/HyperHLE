@@ -175,6 +175,14 @@ pub struct Environment {
     udf_log_counts: HashMap<u32, u32>,
     scheduler_watchdog: SchedulerWatchdog,
     trainer: crate::trainer::Trainer,
+    /// Set when the main guest thread was terminated by the C++ exception
+    /// bypass machinery (unrecoverable exception loop, assert, etc.). Unlike
+    /// a normal main() return, this leaves the main thread's saved CPU state
+    /// pointing at corrupt code, so letting the executor re-enter it makes it
+    /// re-execute the same garbage forever (Terraria 1.0 burned the CPU and
+    /// flooded the log with millions of repeated assertion lines). Once set,
+    /// the main run loop stops instead of resuming the dead thread.
+    pub(crate) main_thread_terminated: bool,
 }
 
 /// What to do next when executing this thread.
@@ -906,6 +914,7 @@ let default_ipad = DeviceFamily::iPad2;
             udf_log_counts: HashMap::new(),
             scheduler_watchdog: SchedulerWatchdog::default(),
             trainer: crate::trainer::Trainer::new(trainer_enabled),
+            main_thread_terminated: false,
         };
         crate::trainer_ui::set_hardware_enabled(trainer_enabled);
 
@@ -1063,6 +1072,7 @@ let default_ipad = DeviceFamily::iPad2;
             udf_log_counts: HashMap::new(),
             scheduler_watchdog: SchedulerWatchdog::default(),
             trainer: crate::trainer::Trainer::new(false),
+            main_thread_terminated: false,
         };
         crate::trainer_ui::set_hardware_enabled(false);
 
@@ -1134,6 +1144,7 @@ let default_ipad = DeviceFamily::iPad2;
             udf_log_counts: HashMap::new(),
             scheduler_watchdog: SchedulerWatchdog::default(),
             trainer: crate::trainer::Trainer::new(false),
+            main_thread_terminated: false,
         }
     }
 
@@ -1688,6 +1699,12 @@ let default_ipad = DeviceFamily::iPad2;
             100_000
         };
         loop {
+            if self.main_thread_terminated {
+                log_no_panic!(
+                    "Main guest thread was terminated by the exception machinery; stopping the main run loop instead of re-entering corrupt state."
+                );
+                return;
+            }
             if stepping {
                 self.remaining_ticks = None;
             } else {
@@ -2384,10 +2401,21 @@ let default_ipad = DeviceFamily::iPad2;
                                 result
                             });
                             if spins > 8 {
-                                log_no_panic!(
-                                    "Guest thread {} is stuck re-executing unhandled SVC #{} at {:#x} (no handler, not a linkable stub); terminating the thread to prevent an infinite loop.",
-                                    self.current_thread, svc, svc_pc
-                                );
+                                // log_once per PC: this fires repeatedly when
+                                // a corrupt guest keeps re-entering, and the
+                                // full message flooded logs (Terraria 1.0).
+                                thread_local! {
+                                    static SVC_STUCK_LOGGED: RefCell<std::collections::HashSet<u32>> =
+                                        RefCell::new(std::collections::HashSet::new());
+                                }
+                                SVC_STUCK_LOGGED.with(|set| {
+                                    if set.borrow_mut().insert(svc_pc) {
+                                        log_no_panic!(
+                                            "Guest thread {} is stuck re-executing unhandled SVC #{} at {:#x} (no handler, not a linkable stub); terminating the thread to prevent an infinite loop.",
+                                            self.current_thread, svc, svc_pc
+                                        );
+                                    }
+                                });
                                 return ThreadNextAction::ReturnToHost;
                             }
                             self.cpu.regs_mut()[cpu::Cpu::PC] = svc_pc;

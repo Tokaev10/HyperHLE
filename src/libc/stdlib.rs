@@ -1293,13 +1293,41 @@ fn __assert_rtn(
     let func_str = read_cstr_safe(env, func);
     let file_str = read_cstr_safe(env, file);
     let expr_str = read_cstr_safe(env, expr);
-    log!(
-        "Assertion failed: ({}) in function {}, file {}, line {}.",
-        expr_str,
-        func_str,
-        file_str,
-        line
-    );
+    // Dedup by (file, line): a guest assert that throws into our bypass
+    // unwinder usually repeats forever (Terraria 1.0's GetWidget loop), and
+    // the corrupt function-name buffer produces a different garbage string
+    // every time, so keying on the name is useless. Log the first occurrence
+    // in full, then one summary per 200 occurrences.
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+    static ASSERT_KEYS: Mutex<Option<HashSet<(String, u32)>>> = Mutex::new(None);
+    static ASSERT_SUPPRESSED: AtomicU32 = AtomicU32::new(0);
+    let key = (file_str.clone(), line as u32);
+    let is_new = {
+        let mut guard = ASSERT_KEYS.lock().unwrap();
+        let set = guard.get_or_insert_with(HashSet::new);
+        set.insert(key)
+    };
+    if is_new {
+        log!(
+            "Assertion failed: ({}) in function {}, file {}, line {}.",
+            expr_str,
+            func_str,
+            file_str,
+            line
+        );
+    } else {
+        let suppressed = ASSERT_SUPPRESSED.fetch_add(1, Ordering::Relaxed) + 1;
+        if suppressed % 200 == 0 {
+            log!(
+                "Assertion failed: {} further repeated asserts in {}:{} suppressed so far.",
+                suppressed,
+                file_str,
+                line
+            );
+        }
+    }
 }
 
 fn __assert(env: &mut Environment, expr: ConstPtr<u8>, file: ConstPtr<u8>, line: i32) {
