@@ -44,6 +44,7 @@ mod crash_handler;
 mod fastmap;
 mod font;
 mod frameworks;
+mod guest_clock;
 mod fs;
 mod gdb;
 mod gles;

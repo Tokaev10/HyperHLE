@@ -152,6 +152,7 @@ pub static GUEST_PC_RING_IDX: std::sync::atomic::AtomicUsize =
 pub struct Environment {
     /// Reference point for various timing functions.
     pub startup_time: Instant,
+    pub(crate) guest_clock: crate::guest_clock::GuestClock,
     pub bundle: NullableBox<bundle::Bundle>,
     pub fs: NullableBox<fs::Fs>,
     /// The window is only absent when running in headless mode.
@@ -901,6 +902,7 @@ let default_ipad = DeviceFamily::iPad2;
 
         let mut env = Environment {
             startup_time,
+            guest_clock: crate::guest_clock::GuestClock::new(),
             bundle: NullableBox::new(bundle),
             fs: NullableBox::new(fs),
             window,
@@ -1074,6 +1076,7 @@ let default_ipad = DeviceFamily::iPad2;
 
         let mut env = Environment {
             startup_time,
+            guest_clock: crate::guest_clock::GuestClock::new(),
             bundle: NullableBox::new(bundle),
             fs: NullableBox::new(fs),
             window,
@@ -1147,6 +1150,7 @@ let default_ipad = DeviceFamily::iPad2;
     unsafe fn new_fake() -> Self {
         Self {
             startup_time: Instant::now(),
+            guest_clock: crate::guest_clock::GuestClock::new(),
             bundle: NullableBox::null(),
             fs: NullableBox::null(),
             window: None,
@@ -1471,7 +1475,9 @@ let default_ipad = DeviceFamily::iPad2;
                 "Thread {} requested a zero-duration sleep; pacing cooperative yield at 1ms.",
                 self.current_thread
             );
-            let until = Instant::now()
+            let until = self
+                .guest_clock
+                .now()
                 .checked_add(Duration::from_millis(1))
                 .unwrap();
             self.yield_thread(ThreadBlock::Sleeping(until));
@@ -1483,7 +1489,7 @@ let default_ipad = DeviceFamily::iPad2;
             self.current_thread,
             duration
         );
-        let until = Instant::now().checked_add(duration).unwrap();
+        let until = self.guest_clock.now().checked_add(duration).unwrap();
         self.yield_thread(ThreadBlock::Sleeping(until));
     }
 
@@ -1703,7 +1709,9 @@ let default_ipad = DeviceFamily::iPad2;
             match self.threads[0].blocked_by {
                 ThreadBlock::NotBlocked => {}
                 ThreadBlock::Sleeping(until) => {
-                    let duration = until.duration_since(Instant::now());
+                    let guest_duration = until.duration_since(self.guest_clock.now());
+                    let duration =
+                        guest_duration.div_f64(self.guest_clock.speed_multiplier());
                     std::thread::sleep(duration);
                 }
                 ref other => {
@@ -1731,6 +1739,9 @@ let default_ipad = DeviceFamily::iPad2;
             100_000
         };
         loop {
+            if let Some(label) = self.guest_clock.poll_speed_request() {
+                log!("Guest clock speed set to {}.", label);
+            }
             if self.main_thread_terminated {
                 log_no_panic!(
                     "Main guest thread was terminated by the exception machinery; stopping the main run loop instead of re-entering corrupt state."
@@ -2636,7 +2647,7 @@ let default_ipad = DeviceFamily::iPad2;
         loop {
             // Try to find a new thread to execute, starting with the thread
             // following the one currently executing.
-            let now = Instant::now();
+            let now = self.guest_clock.now();
             let mut next_awakening: Option<Instant> = None;
             for i in 0..self.threads.len() {
                 let thread_id = (self.current_thread + 1 + i) % self.threads.len();
@@ -2768,7 +2779,11 @@ let default_ipad = DeviceFamily::iPad2;
                                 // Теперь эмулятор не упадет, а честно уснет до
                                 // этого момента.
                                 let remaining = deadline - time;
-                                let awakening = Instant::now() + remaining;
+                                let awakening = self
+                                    .guest_clock
+                                    .now()
+                                    .checked_add(remaining)
+                                    .unwrap();
                                 next_awakening = match next_awakening {
                                     None => Some(awakening),
                                     Some(other) => Some(other.min(awakening)),
@@ -2833,7 +2848,8 @@ let default_ipad = DeviceFamily::iPad2;
             // All suitable threads are blocked and at least one is asleep.
             // Sleep until one of them wakes up.
             if let Some(next_awakening) = next_awakening {
-                let duration = next_awakening.duration_since(Instant::now());
+                let guest_duration = next_awakening.duration_since(self.guest_clock.now());
+                let duration = guest_duration.div_f64(self.guest_clock.speed_multiplier());
                 log_dbg!("All threads blocked/asleep, sleeping for {:?}.", duration);
                 std::thread::sleep(duration);
                 // Try again, there should be some thread awake now (or

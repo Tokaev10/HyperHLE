@@ -71,11 +71,15 @@ pub type CFTimeZoneRef = CFTypeRef;
 
 // MARK: - Current time
 
-fn CFAbsoluteTimeGetCurrent(_env: &mut Environment) -> CFAbsoluteTime {
-    match SystemTime::now().duration_since(apple_epoch()) {
-        Ok(duration) => duration.as_secs_f64(),
-        Err(error) => -error.duration().as_secs_f64(),
-    }
+fn CFAbsoluteTimeGetCurrent(env: &mut Environment) -> CFAbsoluteTime {
+    // The guest clock can be set to any value (including one before the Apple
+    // epoch) via settimeofday, so never panic here: fall back to 0 (= the
+    // Apple epoch itself) for out-of-range hosts.
+    env.guest_clock
+        .system_time()
+        .duration_since(apple_epoch())
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 // MARK: - Time zone

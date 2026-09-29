@@ -2444,6 +2444,27 @@ impl Window {
                     self.toggle_fullscreen();
                     continue;
                 }
+                // Guest clock speed: F10 = slower, Shift+F10 = faster,
+                // Alt+F10 = reset to 1x.
+                E::KeyDown {
+                    keycode: Some(sdl2::keyboard::Keycode::F10),
+                    keymod,
+                    repeat: false,
+                    ..
+                } => {
+                    let cmd =
+                        if keymod.intersects(sdl2::keyboard::Mod::LALTMOD | sdl2::keyboard::Mod::RALTMOD) {
+                            3
+                        } else if keymod
+                            .intersects(sdl2::keyboard::Mod::LSHIFTMOD | sdl2::keyboard::Mod::RSHIFTMOD)
+                        {
+                            2
+                        } else {
+                            1
+                        };
+                    crate::guest_clock::request_speed(cmd);
+                    continue;
+                }
                 // Toggle FPS counter with F9
                 E::KeyDown {
                     keycode: Some(sdl2::keyboard::Keycode::F9),

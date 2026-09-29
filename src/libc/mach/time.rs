@@ -39,7 +39,7 @@ fn mach_timebase_info(
 /// [mach_timebase_info], should be the absolute time in nanoseconds.
 /// The absolute time is a monotonic clock with an arbitrary starting point.
 fn mach_absolute_time(env: &mut Environment) -> u64 {
-    let now = Instant::now();
+    let now = env.guest_clock.now();
     now.duration_since(env.startup_time)
         .as_nanos()
         .try_into()
@@ -49,7 +49,7 @@ fn mach_absolute_time(env: &mut Environment) -> u64 {
 fn mach_wait_until(env: &mut Environment, deadline: u64) -> kern_return_t {
     const MAX_SLEEP_NANOS: u64 = 60 * 60 * 1_000_000_000;
     loop {
-        let now = Instant::now()
+        let now = env.guest_clock.now()
             .duration_since(env.startup_time)
             .as_nanos()
             .try_into()

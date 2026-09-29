@@ -599,9 +599,11 @@ fn gettimeofday(
         return 0;
     }
 
-    let time = SystemTime::now()
+    let time = env
+        .guest_clock
+        .system_time()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
+        .unwrap_or_default();
 
     let time_s_64: u64 = time.as_secs();
     let tv_sec = time_s_64 as time_t;
