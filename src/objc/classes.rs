@@ -21,6 +21,7 @@ use crate::mem::{
     guest_size_of, ConstPtr, ConstVoidPtr, GuestUSize, Mem, MutVoidPtr, Ptr, SafeRead,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
+use crate::fastmap::FxHashMap;
 use std::sync::{Mutex, OnceLock};
 
 /// Generic pointer to an Objective-C class or metaclass.
@@ -41,8 +42,8 @@ pub(super) struct ClassHostObject {
     pub(super) name: String,
     pub(super) is_metaclass: bool,
     pub(super) superclass: Class,
-    pub(super) methods: HashMap<SEL, IMP>,
-    pub(super) guest_method_signatures: HashMap<SEL, ConstPtr<u8>>,
+    pub(super) methods: FxHashMap<SEL, IMP>,
+    pub(super) guest_method_signatures: FxHashMap<SEL, ConstPtr<u8>>,
     /// Maps ivar name to a tuple of an offset (as pointer) and an alignment.
     /// (Alignment is used during ivar reconciliation.)
     pub(super) ivars: HashMap<String, (ConstPtr<GuestUSize>, u32)>,
@@ -292,7 +293,7 @@ impl ClassHostObject {
             name: template.name.to_string(),
             is_metaclass,
             superclass,
-            methods: HashMap::from_iter(
+            methods: FxHashMap::from_iter(
                 (if is_metaclass {
                     template.class_methods
                 } else {
@@ -306,7 +307,7 @@ impl ClassHostObject {
                     (objc.selectors[name], IMP::Host(host_imp))
                 }),
             ),
-            guest_method_signatures: HashMap::default(),
+            guest_method_signatures: FxHashMap::default(),
             // maybe this should be 0 for NSObject? does it matter?
             instance_start: size,
             instance_size: size,
@@ -355,8 +356,8 @@ impl ClassHostObject {
             name,
             is_metaclass,
             superclass,
-            methods: HashMap::new(),
-            guest_method_signatures: HashMap::new(),
+            methods: FxHashMap::default(),
+            guest_method_signatures: FxHashMap::default(),
             instance_start,
             instance_size,
             ivars: HashMap::new(),

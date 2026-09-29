@@ -28,6 +28,7 @@
 mod log;
 mod a64_abi;
 mod android_media;
+mod android_web_view;
 mod env_flags;
 mod abi;
 mod arm64_runtime;
@@ -35,9 +36,12 @@ mod audio;
 mod bundle;
 mod cpu;
 mod debug;
+mod corrupt;
 mod dyld;
 mod environment;
 mod environment64;
+mod crash_handler;
+mod fastmap;
 mod font;
 mod frameworks;
 mod fs;
@@ -70,6 +74,15 @@ mod window;
 use environment::{Environment, MutexId, MutexType, ThreadId, PTHREAD_MUTEX_DEFAULT};
 
 use std::path::PathBuf;
+
+// PERF: use mimalloc as the global allocator. The emulator performs a large
+// number of small, short-lived allocations per frame (autorelease pools,
+// string handling and various collections in the Foundation/UIKit HLE
+// implementations), a workload that mimalloc handles measurably faster than
+// the platform malloc — in particular on Android, where every allocation
+// additionally goes through Scudo hardening.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub use touchHLE_version::*;
 /// This is the true entry point on Android (SDLActivity calls it after
@@ -196,6 +209,9 @@ fn detect_engine_and_enable_diagnostics(
 }
 
 pub fn main<T: Iterator<Item = String>>(mut args: T) -> Result<(), String> {
+    crash_handler::install();
+    crash_handler::install_panic_hook();
+
     struct PerfReportGuard;
     impl Drop for PerfReportGuard {
         fn drop(&mut self) {

@@ -539,6 +539,31 @@ Game options:
         Enable or disable the optional in-game Cheat Engine memory search and
         patch overlay. It is disabled by default and can also be toggled in
         the app picker settings.
+    --corrupt-game / --no-corrupt-game
+        Enable the RTCV-style "game corruption" engine (opt-in; disabled by
+        default). At a configurable cadence the emulator overwrites random
+        bytes of the running game's live memory with random values,
+        producing the glitchy, "broken game" behaviour the Real-Time
+        Corruptor (RTCV) is known for: corrupted graphics, audio, physics,
+        and entertaining crashes. Only memory the guest has actually
+        allocated is targeted, so the game keeps running (and glitching)
+        instead of instantly crashing. Implemented natively in Rust; works
+        on both desktop and Android. Use --no-corrupt-game to disable it.
+    --corrupt-interval=<frames>
+        How many main-loop iterations to wait between corruption bursts.
+        Lower is more aggressive. Default: 30. Implies --corrupt-game.
+    --corrupt-intensity=<count>
+        How many random bytes to corrupt per burst. Higher is more
+        destructive. Default: 8. Implies --corrupt-game.
+    --corrupt-seed=<number>
+        Seed for the corruption PRNG. A given seed reproduces the same
+        corruption stream, mirroring RTCV's reproducible-via-seed
+        behaviour. Default: a fixed built-in seed. Implies --corrupt-game.
+    --corrupt-max-offset=<bytes>
+        Restrict corruption to the first <bytes> of each allocation, which
+        tends to concentrate hits on object headers / hot fields. By
+        default the whole of each allocation is eligible. Implies
+        --corrupt-game.
     --skip-intros / --no-skip-intros
         Skip full-screen intro movies: each movie reports an immediate
         user-exited finish notification, so games advance straight to the

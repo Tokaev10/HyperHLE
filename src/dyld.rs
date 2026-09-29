@@ -20,6 +20,7 @@
 //! See [crate::mach_o] for resources.
 
 mod dylib_list;
+mod swift_runtime;
 
 use crate::abi::{CallFromGuest, GuestFunction};
 use crate::bundle;
@@ -420,6 +421,12 @@ pub struct Dyld {
     host_function_cache: HashMap<String, Option<(&'static str, HostFunction)>>,
     host_constant_cache: HashMap<String, Option<&'static HostConstant>>,
     cxxabi_typeinfo_vtable_kinds: HashMap<u32, CxxAbiTypeInfoKind>,
+    /// Cache of Swift runtime function trampolines (see `swift_runtime`).
+    swift_fn_cache: HashMap<String, GuestFunction>,
+    /// Interned `&'static str` copies of Swift symbol names.
+    swift_fn_names: HashMap<String, &'static str>,
+    /// Stable data slots for Swift metadata symbols.
+    swift_data_slots: HashMap<String, u32>,
 }
 
 impl Dyld {
@@ -453,6 +460,9 @@ impl Dyld {
             host_function_cache: HashMap::new(),
             host_constant_cache: HashMap::new(),
             cxxabi_typeinfo_vtable_kinds: HashMap::new(),
+            swift_fn_cache: HashMap::new(),
+            swift_fn_names: HashMap::new(),
+            swift_data_slots: HashMap::new(),
         }
     }
 
@@ -1126,6 +1136,13 @@ impl Dyld {
                     mem.write(p + i, 0);
                 }
                 p.cast().cast_const()
+            } else if let Some(link) = self.swift_intercept(mem, name) {
+                match link {
+                    swift_runtime::SwiftLink::Function(f) => {
+                        Ptr::<std::ffi::c_void, false>::from_bits(f.to_ptr().to_bits())
+                    }
+                    swift_runtime::SwiftLink::Data(slot) => slot,
+                }
             } else if let Some(&external_addr) = bins
                 .iter()
                 .flat_map(|other_bin| other_bin.exported_symbols.get(name))
@@ -1451,6 +1468,22 @@ impl Dyld {
                 );
                 mem.write(ptr_ptr, ti);
                 log_dbg!("Stubbed C++ typeinfo {} at {:#x}", symbol, ti.to_bits());
+                continue;
+            }
+
+            // Swift runtime symbols (`__swift_retain`, `__T0SSN` type
+            // metadata, `__T0*Ma` accessors, …). Swift binaries (e.g. Alto's
+            // Adventure) reference these from `__nl_symbol_ptr`; leaving them
+            // NULL kills the app during Swift initialization.
+            if let Some(link) = self.swift_intercept(mem, symbol) {
+                let target = match link {
+                    swift_runtime::SwiftLink::Function(f) => f.to_ptr(),
+                    swift_runtime::SwiftLink::Data(slot) => {
+                        crate::mem::Ptr::from_bits(slot.to_bits())
+                    }
+                };
+                mem.write(ptr_ptr, target.cast());
+                log_dbg!("Linked Swift runtime symbol {} at {:#x}", symbol, target.to_bits());
                 continue;
             }
 

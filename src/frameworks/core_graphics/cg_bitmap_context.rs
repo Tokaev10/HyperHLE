@@ -8,7 +8,9 @@
 
 use super::cg_affine_transform::{CGAffineTransform, CGAffineTransformIdentity};
 use super::cg_color_space::{
-    kCGColorSpaceGenericGray, kCGColorSpaceGenericRGB, CGColorSpaceHostObject, CGColorSpaceRef,
+    kCGColorSpaceGenericCMYK, kCGColorSpaceGenericGray, kCGColorSpaceGenericRGB,
+    kCGColorSpaceModelCMYK, kCGColorSpaceModelMonochrome, kCGColorSpaceModelRGB,
+    CGColorSpaceHostObject, CGColorSpaceRef,
 };
 use super::cg_context::{
     kCGBlendModeClear, kCGBlendModeCopy, kCGBlendModeDarken, kCGBlendModeLighten,
@@ -104,13 +106,18 @@ pub fn CGBitmapContextCreate(
         line_join: 0,
         miter_limit: 10.0,
         flatness: 0.0,
+        fill_color_space_model: match color_space_name {
+            kCGColorSpaceGenericGray => kCGColorSpaceModelMonochrome,
+            kCGColorSpaceGenericCMYK => kCGColorSpaceModelCMYK,
+            _ => kCGColorSpaceModelRGB,
+        },
         blend_mode: kCGBlendModeNormal,
         interpolation_quality: 2,
         // Quartz's default font state.
         font: crate::mem::Ptr::null(),
         font_size: 17.0,
         state_stack: Vec::new(),
-        path_points: Vec::new(),
+        path_elements: Vec::new(),
         // Apple defaults: rendering intent unspecified = `kCGRenderingIntentDefault` (0).
         rendering_intent: 0,
         shadow: crate::frameworks::core_graphics::cg_context::CGShadowState::default(),
@@ -510,6 +517,28 @@ impl CGBitmapContextDrawer<'_> {
         blend: bool,
     ) {
         put_pixel(&self.bitmap_info, self.pixels, coords, color, blend, self.blend_mode)
+    }
+
+    /// Convert a straight sRGB source into the representation used by this
+    /// bitmap's existing pixel blender, just as rgb_fill_color does.
+    pub(super) fn put_srgba_pixel(
+        &mut self,
+        coords: (i32, i32),
+        color: (CGFloat, CGFloat, CGFloat, CGFloat),
+        blend: bool,
+    ) {
+        let (r, g, b, a) = color;
+        let a = a.clamp(0.0, 1.0);
+        let factor = match self.bitmap_info.alpha_info {
+            kCGImageAlphaPremultipliedLast | kCGImageAlphaPremultipliedFirst => a,
+            _ => 1.0,
+        };
+        self.put_pixel(coords, (
+            gamma_decode(r.clamp(0.0, 1.0) * factor),
+            gamma_decode(g.clamp(0.0, 1.0) * factor),
+            gamma_decode(b.clamp(0.0, 1.0) * factor),
+            a,
+        ), blend);
     }
 
     pub fn iter_transformed_pixels(

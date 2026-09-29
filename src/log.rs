@@ -78,10 +78,12 @@ pub fn flush_log_file() {
 /// who don't have access to ADB, so we also write to a log file.
 pub fn get_log_file() -> &'static Mutex<BufWriter<std::fs::File>> {
     static LOG_FILE: LazyLock<Mutex<BufWriter<std::fs::File>>> = LazyLock::new(|| {
-        Mutex::new(BufWriter::new(
+        let file =
             std::fs::File::create(crate::paths::user_data_base_path().join("touchHLE_log.txt"))
-                .unwrap(),
-        ))
+                .unwrap();
+        #[cfg(unix)]
+        crate::crash_handler::set_log_fd(std::os::fd::AsRawFd::as_raw_fd(&file));
+        Mutex::new(BufWriter::new(file))
     });
 
     &LOG_FILE

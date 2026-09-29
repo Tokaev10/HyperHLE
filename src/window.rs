@@ -1718,6 +1718,12 @@ impl Window {
             "Magnetometer detected: synthetic 3-axis Earth-field model (no host magnetic sensor)."
         );
 
+        // Resolve the WebView overlay bridge's JNI class and method IDs here:
+        // FindClass needs the app class loader, which is only reachable from
+        // this stack before guest code starts running on a coroutine stack.
+        #[cfg(target_os = "android")]
+        crate::android_web_view::populate_jni_cache();
+
         #[cfg(target_os = "macos")]
         let max_height = window.size().1;
 
@@ -3633,6 +3639,57 @@ impl Window {
         self.window.drawable_size()
     }
 
+    /// Map a guest-space `CGRect` (points, possibly rotated/letterboxed) to
+    /// host window pixels `(x, y, w, h)` for host-side overlays (native
+    /// Android webviews etc.). Ported from HyperHLE. Returns `w`/`h` of 0
+    /// when nothing is visible.
+    pub fn guest_frame_to_window_px(
+        &self,
+        frame: crate::frameworks::core_graphics::CGRect,
+    ) -> (i32, i32, i32, i32) {
+        let (vp_x, vp_y, vp_w, vp_h) = self.viewport();
+        let (app_w, app_h) = self.size_unrotated_unscaled();
+        let (app_w, app_h) = (app_w as f32, app_h as f32);
+        if app_w <= 0.0 || app_h <= 0.0 || vp_w == 0 || vp_h == 0 {
+            return (0, 0, 0, 0);
+        }
+        let sx = vp_w as f32 / app_w;
+        let sy = vp_h as f32 / app_h;
+        // Rotate the guest rect into the device orientation, then scale to
+        // viewport pixels (mirrors the composition rotation).
+        let (x, y, w, h) = match self.device_orientation {
+            DeviceOrientation::Portrait => (
+                frame.origin.x as f32,
+                frame.origin.y as f32,
+                frame.size.width as f32,
+                frame.size.height as f32,
+            ),
+            DeviceOrientation::PortraitUpsideDown => (
+                app_w - frame.origin.x as f32 - frame.size.width as f32,
+                app_h - frame.origin.y as f32 - frame.size.height as f32,
+                frame.size.width as f32,
+                frame.size.height as f32,
+            ),
+            DeviceOrientation::LandscapeLeft => (
+                frame.origin.y as f32,
+                app_w - frame.origin.x as f32 - frame.size.width as f32,
+                frame.size.height as f32,
+                frame.size.width as f32,
+            ),
+            DeviceOrientation::LandscapeRight => (
+                app_h - frame.origin.y as f32 - frame.size.height as f32,
+                frame.origin.x as f32,
+                frame.size.height as f32,
+                frame.size.width as f32,
+            ),
+        };
+        let px = (vp_x as f32 + x * sx).round() as i32;
+        let py = (vp_y as f32 + y * sy).round() as i32;
+        let pw = (w * sx).round() as i32;
+        let ph = (h * sy).round() as i32;
+        (px, py, pw.max(0), ph.max(0))
+    }
+
     pub fn is_software_presentation(&self) -> bool {
         self.software_presentation
     }
@@ -3798,6 +3855,12 @@ pub fn open_url(env: &mut Environment, url: &str) -> Result<(), String> {
             return Err(format!(
                 "Android picker command failed with return code {result}"
             ));
+        }
+    }
+    #[cfg(target_os = "android")]
+    {
+        if crate::android_web_view::open_url_external(url) {
+            return Ok(());
         }
     }
     env.on_parent_stack_in_coroutine(|_, _| sdl2::url::open_url(url).map_err(|e| e.to_string()))

@@ -25,7 +25,7 @@ use crate::dyld::{
 use crate::MutexId;
 use std::any::TypeId;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use crate::fastmap::{FxHashMap, FxHashSet};
 
 mod classes;
 mod messages;
@@ -99,34 +99,34 @@ pub type NSZonePtr = crate::mem::MutVoidPtr;
 /// Main type holding Objective-C runtime state.
 pub struct ObjC {
     /// Known selectors (interned method name strings).
-    selectors: HashMap<String, SEL>,
+    selectors: FxHashMap<String, SEL>,
 
     /// Reverse index for selector names. Selectors are interned and immutable,
     /// so this avoids scanning every registered selector on hot introspection
     /// paths.
-    selector_names: HashMap<SEL, String>,
+    selector_names: FxHashMap<SEL, String>,
 
     /// Reverse index for class and metaclass names.
-    class_names: HashMap<Class, String>,
+    class_names: FxHashMap<Class, String>,
 
     /// Stable guest pointers returned by class_getName.
-    class_name_ptrs: HashMap<Class, crate::mem::ConstPtr<u8>>,
+    class_name_ptrs: FxHashMap<Class, crate::mem::ConstPtr<u8>>,
 
     /// Mapping of known (guest) object pointers to their host objects.
     ///
     /// If an object isn't in this map, we will consider it not to exist.
-    objects: HashMap<id, HostObjectEntry>,
+    objects: FxHashMap<id, HostObjectEntry>,
 
     /// Isolated compatibility state for mutable access to a missing object.
-    missing_objects: RefCell<HashMap<(id, TypeId), Box<dyn AnyHostObject>>>,
+    missing_objects: RefCell<FxHashMap<(id, TypeId), Box<dyn AnyHostObject>>>,
 
     /// Known classes.
     ///
     /// Look at the `isa` to get the metaclass for a class.
-    classes: HashMap<String, Class>,
+    classes: FxHashMap<String, Class>,
 
     /// Mutexes used in @synchronized blocks (objc_sync_enter/exit).
-    sync_mutexes: HashMap<id, MutexId>,
+    sync_mutexes: FxHashMap<id, MutexId>,
 
     /// Per-object recursive mutexes used to make `atomic` properties
     /// thread-safe (`objc_getProperty(..., atomic=true)` /
@@ -145,7 +145,7 @@ pub struct ObjC {
     /// `copyWithZone:` of e.g. `NSMutableString` may itself synthesize
     /// further atomic-property reads on the same object. Lazy created
     /// on first contended access; cleaned up in `dealloc_object`.
-    property_locks: HashMap<id, MutexId>,
+    property_locks: FxHashMap<id, MutexId>,
 
     /// Temporary storage for optional type information when sending a message.
     /// Type information isn't part of the `objc_msgSend` ABI, so an alternative
@@ -156,7 +156,7 @@ pub struct ObjC {
     /// (or were determined not to need it). Used to implement Apple's lazy
     /// `+initialize` dispatch contract:
     /// <https://developer.apple.com/documentation/objectivec/nsobject/1418639-initialize>
-    pub(super) initialized_classes: HashSet<Class>,
+    pub(super) initialized_classes: FxHashSet<Class>,
 
     /// ARC weak-reference side table.
     ///
@@ -174,7 +174,7 @@ pub struct ObjC {
     ///   `objc_storeWeak` / `objc_loadWeakRetained` / `objc_destroyWeak`.
     /// - Apple `objc-runtime-new.mm` `weak_table_t` (open-source on
     ///   <https://opensource.apple.com/source/objc4/>).
-    pub(crate) weak_refs: HashMap<id, Vec<crate::mem::MutPtr<id>>>,
+    pub(crate) weak_refs: FxHashMap<id, Vec<crate::mem::MutPtr<id>>>,
 
     /// Per-object table of values set via `objc_setAssociatedObject`.
     ///
@@ -188,7 +188,7 @@ pub struct ObjC {
     /// References:
     /// - <https://developer.apple.com/documentation/objectivec/1418509-objc_setassociatedobject>
     /// - Apple `objc-references.mm` (open-source `objc4`).
-    pub(crate) associated_objects: HashMap<(id, crate::mem::GuestUSize), (id, bool)>,
+    pub(crate) associated_objects: FxHashMap<(id, crate::mem::GuestUSize), (id, bool)>,
 
     /// Cache of opaque `Method` handles handed out to the guest.
     ///
@@ -202,7 +202,7 @@ pub struct ObjC {
     /// relies on (e.g. it compares `Method` pointers, or expects
     /// `method_getImplementation` on the returned handle to see the effect
     /// of a prior `method_setImplementation`).
-    pub(super) method_handles: HashMap<(Class, SEL), crate::mem::MutVoidPtr>,
+    pub(super) method_handles: FxHashMap<(Class, SEL), crate::mem::MutVoidPtr>,
 
     /// Reverse map from a synthesised `IMP` token pointer (see
     /// [Self::host_imp_tokens]) back to the real [methods::IMP]. Host
@@ -210,35 +210,35 @@ pub struct ObjC {
     /// `method_getImplementation` hands out a unique token pointer for them
     /// and records the mapping here so `method_setImplementation` /
     /// `method_exchangeImplementations` can round-trip host implementations.
-    pub(super) imp_tokens: HashMap<crate::mem::GuestUSize, methods::IMP>,
+    pub(super) imp_tokens: FxHashMap<crate::mem::GuestUSize, methods::IMP>,
 
     /// Cache of token pointers minted for host `IMP`s, keyed by the
     /// (defining class, selector) whose implementation the token stands in
     /// for. Keeps the token pointer stable so that
     /// `method_getImplementation(m) == method_getImplementation(m)` holds,
     /// matching Apple's behaviour.
-    pub(super) host_imp_tokens: HashMap<(Class, SEL), crate::mem::MutVoidPtr>,
+    pub(super) host_imp_tokens: FxHashMap<(Class, SEL), crate::mem::MutVoidPtr>,
 }
 
 impl ObjC {
     pub fn new() -> ObjC {
         ObjC {
-            selectors: HashMap::new(),
-            selector_names: HashMap::new(),
-            class_names: HashMap::new(),
-            class_name_ptrs: HashMap::new(),
-            objects: HashMap::new(),
-            missing_objects: RefCell::new(HashMap::new()),
-            classes: HashMap::new(),
-            sync_mutexes: HashMap::new(),
-            property_locks: HashMap::new(),
+            selectors: FxHashMap::default(),
+            selector_names: FxHashMap::default(),
+            class_names: FxHashMap::default(),
+            class_name_ptrs: FxHashMap::default(),
+            objects: FxHashMap::default(),
+            missing_objects: RefCell::new(FxHashMap::default()),
+            classes: FxHashMap::default(),
+            sync_mutexes: FxHashMap::default(),
+            property_locks: FxHashMap::default(),
             message_type_info: None,
-            initialized_classes: HashSet::new(),
-            weak_refs: HashMap::new(),
-            associated_objects: HashMap::new(),
-            method_handles: HashMap::new(),
-            imp_tokens: HashMap::new(),
-            host_imp_tokens: HashMap::new(),
+            initialized_classes: FxHashSet::default(),
+            weak_refs: FxHashMap::default(),
+            associated_objects: FxHashMap::default(),
+            method_handles: FxHashMap::default(),
+            imp_tokens: FxHashMap::default(),
+            host_imp_tokens: FxHashMap::default(),
         }
     }
 

@@ -26,6 +26,10 @@ pub mod ab_people_picker_navigation_controller;
 pub mod asidentifier_manager;
 pub mod chipmunk_space;
 pub mod ns_array;
+pub mod ns_attributed_string;
+pub mod ns_map_table;
+pub mod ns_net_service;
+pub mod ns_pointer_array;
 pub mod ns_assertion_handler;
 pub mod ns_autorelease_pool;
 pub mod ns_bundle;
@@ -89,6 +93,7 @@ pub mod ns_url_connection;
 pub mod ns_url_request;
 pub mod ns_url_response;
 pub mod ns_url_session;
+pub mod url_protocol;
 pub mod ns_user_defaults;
 pub mod ns_uuid;
 pub mod ns_value;
@@ -1534,6 +1539,10 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_notification_center::CLASSES,
         ns_null::CLASSES,
         ns_number_formatter::CLASSES,
+        ns_attributed_string::CLASSES,
+        ns_map_table::CLASSES,
+        ns_net_service::CLASSES,
+        ns_pointer_array::CLASSES,
         ns_object::CLASSES,
         ns_operation::CLASSES,
         ns_ordered_set::CLASSES,
@@ -1560,6 +1569,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ns_url_request::CLASSES,
         ns_url_response::CLASSES,
         ns_url_session::CLASSES,
+        url_protocol::CLASSES,
         ns_user_defaults::CLASSES,
         ns_uuid::CLASSES,
         ns_value::CLASSES,
@@ -1605,6 +1615,7 @@ pub struct State {
     pub ns_undo_manager: ns_undo_manager::State,
     ns_user_defaults: ns_user_defaults::State,
     ns_url_session: ns_url_session::State,
+    url_protocol: url_protocol::State,
     /// Singleton for [NSURLCache sharedURLCache].
     pub url_cache_singleton: crate::objc::id,
 }
@@ -1621,7 +1632,7 @@ pub type NSUInteger = u32;
 // this should be equal to NSIntegerMax
 pub const NSNotFound: i32 = 0x7fffffff;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct NSRange {
     pub location: NSUInteger,

@@ -21,12 +21,14 @@ pub mod ui_activity;
 pub mod ui_activity_indicator_view;
 pub mod ui_alert_controller;
 pub mod ui_application;
+pub mod ui_bezier_path;
 pub mod ui_color;
 pub mod ui_custom_object;
 pub mod ui_device;
 pub mod ui_document;
 pub mod ui_event;
 pub mod ui_font;
+pub mod ui_text_input;
 pub mod ui_geometry;
 pub mod ui_gesture_recognizer;
 pub mod ui_graphics;
@@ -899,6 +901,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_activity::CLASSES,
         ui_alert_controller::CLASSES,
         ui_application::CLASSES,
+        ui_bezier_path::CLASSES,
         ui_color::CLASSES,
         ui_custom_object::CLASSES,
         ui_device::CLASSES,
@@ -912,6 +915,8 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         ui_launch_delegate::CLASSES,
         ui_local_notification::CLASSES,
         ui_navigation_bar::CLASSES,
+        ui_text_input::CLASSES,
+        ui_view::ui_refresh_control::CLASSES,
         ui_nib::CLASSES,
         ui_pasteboard::CLASSES,
         ui_pinch_gesture_recognizer::CLASSES,

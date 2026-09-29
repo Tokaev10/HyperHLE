@@ -60,7 +60,13 @@ symphonia = { version = "0.6.0", default-features = false, features = [
     # formats
     "aiff", "caf", "isomp4", "wav",
     # codecs
-    "aac", "adpcm", "alac", "mp3", "pcm"
+    "aac", "adpcm", "alac", "mp3", "pcm",
+    # standalone metadata readers
+    # (Ported from HyperHLE: without `id3v2` the Id3v2Reader is never
+    # registered with the default Probe, and probing an ID3v2-tagged MP3
+    # degenerates into a capped byte-scan that false-matches inside cover
+    # art, so tagged MP3s frequently fail to open at all.)
+    "ape", "id3v1", "id3v2"
 ] }
 quick-xml = "0.38.4"
 digest = "0.10.7"
@@ -105,11 +111,29 @@ bzip2 = { version = "0.4", features = ["static"] }
 # networking (pure-Rust TLS via rustls, so no system OpenSSL dependency).
 ureq = { version = "2.9", features = ["tls", "gzip"] }
 
+# PERF: use mimalloc as the global allocator (see src/lib.rs). Ported from HyperHLE.
+# PIN: the `v2` feature is required. Without it, libmimalloc-sys 0.1.49 builds
+# mimalloc v3 (locked resolution: v3.3.2), which has an upstream-confirmed
+# multithreading crash class in 3.3.0-3.3.2 (microsoft/mimalloc #1287, #1288:
+# use-after-free under concurrent free of per-thread cache blocks).
+# `default-features = false` also skips libmimalloc-sys's optional secure
+# mode, which would otherwise route every free through a double-free check
+# that additionally goes through Scudo hardening.
+mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
+
 [build-dependencies]
 cargo-license = "0.5.1"
 cc = { workspace = true }
 cmake = { workspace = true }
 gl_generator = { workspace = true }
+
+
+# Patched copy of symphonia-codec-aac 0.6.0: its AAC section-data parser can
+# index out of bounds (len 64, index 64) on unusual but valid streams and
+# panic, taking down the whole emulator. The vendored copy under
+# vendor/symphonia-codec-aac turns that into a recoverable decode error.
+[patch.crates-io]
+symphonia-codec-aac = { path = "vendor/symphonia-codec-aac" }
 
 [profile.release]
 opt-level = 3

@@ -1991,7 +1991,7 @@ pub(super) fn dispatch(
             if kind == StubKind::CMTimeCompare {
                 let left = cm_time_seconds(&time_a);
                 let right = cm_time_seconds(&time_b);
-                let ordering = if (left - right).abs() < 1e-9 {
+                let ordering: i64 = if (left - right).abs() < 1e-9 {
                     0
                 } else if left < right {
                     -1

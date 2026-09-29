@@ -391,6 +391,31 @@ impl RenderRotation {
 }
 
 /// Struct containing all user-configurable options.
+#[derive(Clone, Debug)]
+pub struct CorruptionOptions {
+    pub enabled: bool,
+    pub interval_frames: u32,
+    pub bytes_per_burst: u32,
+    pub max_offset: Option<u32>,
+    pub seed: u64,
+}
+
+impl Default for CorruptionOptions {
+    fn default() -> Self {
+        Self {
+            // RTCV-style corruption is strictly opt-in: only enabled via
+            // --corrupt-game (or the --corrupt-* options, which imply it).
+            // Never on by default — random guest-memory corruption is a
+            // toy/debug feature, not something you want in normal play.
+            enabled: false,
+            interval_frames: 30,
+            bytes_per_burst: 8,
+            max_offset: None,
+            seed: 0x6a09e667f3bcc909,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Options {
     pub fullscreen: bool,
@@ -406,6 +431,7 @@ pub struct Options {
     pub host_screen_size: Option<(u32, u32)>,
     /// Disable the optional in-game Cheat Engine panel.
     pub trainer_disabled: bool,
+    pub corruption: CorruptionOptions,
     /// Explicit custom logical screen size selected in the app picker.
     pub custom_screen_size: Option<(u32, u32)>,
     pub initial_orientation: DeviceOrientation,
@@ -549,6 +575,7 @@ impl Default for Options {
             auto_device_family: false,
             host_screen_size: None,
             trainer_disabled: true,
+            corruption: CorruptionOptions::default(),
             custom_screen_size: None,
             initial_orientation: DeviceOrientation::Portrait,
             render_rotation: RenderRotation::Default,
@@ -653,6 +680,40 @@ impl Options {
             self.trainer_disabled = false;
         } else if arg == "--no-trainer" {
             self.trainer_disabled = true;
+        } else if arg == "--corrupt-game" {
+            self.corruption.enabled = true;
+        } else if arg == "--no-corrupt-game" {
+            self.corruption.enabled = false;
+        } else if let Some(value) = arg.strip_prefix("--corrupt-interval=") {
+            let frames: u32 = value
+                .parse()
+                .ok()
+                .filter(|&v| v > 0)
+                .ok_or_else(|| "Invalid value for --corrupt-interval= (must be > 0)".to_string())?;
+            self.corruption.enabled = true;
+            self.corruption.interval_frames = frames;
+        } else if let Some(value) = arg.strip_prefix("--corrupt-intensity=") {
+            let bytes: u32 = value
+                .parse()
+                .ok()
+                .filter(|&v| v > 0)
+                .ok_or_else(|| {
+                    "Invalid value for --corrupt-intensity= (must be > 0)".to_string()
+                })?;
+            self.corruption.enabled = true;
+            self.corruption.bytes_per_burst = bytes;
+        } else if let Some(value) = arg.strip_prefix("--corrupt-seed=") {
+            let seed: u64 = value
+                .parse()
+                .map_err(|_| "Invalid value for --corrupt-seed=".to_string())?;
+            self.corruption.enabled = true;
+            self.corruption.seed = seed;
+        } else if let Some(value) = arg.strip_prefix("--corrupt-max-offset=") {
+            let off: u32 = value
+                .parse()
+                .map_err(|_| "Invalid value for --corrupt-max-offset=".to_string())?;
+            self.corruption.enabled = true;
+            self.corruption.max_offset = Some(off);
         } else if arg == "--fullscreen" {
             self.fullscreen = true;
         } else if arg == "--fullscreen-stretched" {

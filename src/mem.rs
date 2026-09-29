@@ -1010,6 +1010,14 @@ impl Mem {
         }
     }
 
+    pub fn corrupt_byte(&mut self, addr: GuestUSize, value: u8) -> u8 {
+        let ptr: MutPtr<u8> = Ptr::from_bits(addr);
+        let slice = self.bytes_at_mut(ptr, 1);
+        let old = slice[0];
+        slice[0] = value;
+        old
+    }
+
     pub fn realloc(&mut self, old_ptr: MutVoidPtr, size: GuestUSize) -> MutVoidPtr {
         if old_ptr.is_null() {
             return self.alloc(size);

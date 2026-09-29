@@ -135,6 +135,20 @@ impl std::fmt::Debug for Thread {
 
 /// The struct containing the entire emulator state. Methods are provided for
 /// execution and management of threads.
+
+/// Last guest PC seen by the CPU loop, for crash diagnostics.
+pub static LAST_GUEST_PC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Last guest LR seen by the CPU loop, for crash diagnostics.
+pub static LAST_GUEST_LR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Ring buffer of the last N guest PCs, for crash diagnostics.
+pub static GUEST_PC_RING: [std::sync::atomic::AtomicU32; 32] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    [ZERO; 32]
+};
+pub static GUEST_PC_RING_IDX: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub struct Environment {
     /// Reference point for various timing functions.
     pub startup_time: Instant,
@@ -175,6 +189,7 @@ pub struct Environment {
     udf_log_counts: HashMap<u32, u32>,
     scheduler_watchdog: SchedulerWatchdog,
     trainer: crate::trainer::Trainer,
+    corruptor: crate::corrupt::Corruptor,
     /// Set when the main guest thread was terminated by the C++ exception
     /// bypass machinery (unrecoverable exception loop, assert, etc.). Unlike
     /// a normal main() return, this leaves the main thread's saved CPU state
@@ -914,9 +929,24 @@ let default_ipad = DeviceFamily::iPad2;
             udf_log_counts: HashMap::new(),
             scheduler_watchdog: SchedulerWatchdog::default(),
             trainer: crate::trainer::Trainer::new(trainer_enabled),
+            corruptor: crate::corrupt::Corruptor::default(),
             main_thread_terminated: false,
         };
         crate::trainer_ui::set_hardware_enabled(trainer_enabled);
+
+        env.corruptor = crate::corrupt::Corruptor::new(env.options.corruption.clone());
+        if env.corruptor.is_enabled() {
+            log!(
+                "[corrupt] RTCV-style game corruption ENABLED: every {} frame(s), {} byte(s) per burst, seed {:#x}{}",
+                env.options.corruption.interval_frames.max(1),
+                env.options.corruption.bytes_per_burst.max(1),
+                env.options.corruption.seed,
+                match env.options.corruption.max_offset {
+                    Some(o) => format!(", max offset {}", o),
+                    None => String::new(),
+                }
+            );
+        }
 
         if env.options.dumping_options.any() {
             env.dump_file =
@@ -1072,6 +1102,7 @@ let default_ipad = DeviceFamily::iPad2;
             udf_log_counts: HashMap::new(),
             scheduler_watchdog: SchedulerWatchdog::default(),
             trainer: crate::trainer::Trainer::new(false),
+            corruptor: crate::corrupt::Corruptor::default(),
             main_thread_terminated: false,
         };
         crate::trainer_ui::set_hardware_enabled(false);
@@ -1144,6 +1175,7 @@ let default_ipad = DeviceFamily::iPad2;
             udf_log_counts: HashMap::new(),
             scheduler_watchdog: SchedulerWatchdog::default(),
             trainer: crate::trainer::Trainer::new(false),
+            corruptor: crate::corrupt::Corruptor::default(),
             main_thread_terminated: false,
         }
     }
@@ -1795,6 +1827,14 @@ let default_ipad = DeviceFamily::iPad2;
                 // thread, lest every single callback call pay this cost.
                 if let Some(ref mut window) = self.window {
                     window.poll_for_events(&self.options);
+                }
+                // RTCV-style corruption engine (see --corrupt-game). Runs
+                // before the trainer so the trainer sees post-corruption
+                // memory; a no-op unless explicitly enabled.
+                if self.corruptor.is_enabled() {
+                    let mut corruptor = std::mem::take(&mut self.corruptor);
+                    corruptor.tick(&mut self.mem);
+                    self.corruptor = corruptor;
                 }
                 if !self.options.trainer_disabled {
                     self.trainer.tick(
@@ -2484,6 +2524,31 @@ let default_ipad = DeviceFamily::iPad2;
                 let state = self
                     .cpu
                     .run_or_step(&mut self.mem, self.remaining_ticks.as_mut());
+                let diag_pc = self.cpu.regs()[crate::cpu::Cpu::PC];
+                std::sync::atomic::AtomicU32::store(
+                    &crate::environment::LAST_GUEST_PC,
+                    diag_pc,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                std::sync::atomic::AtomicU32::store(
+                    &crate::environment::LAST_GUEST_LR,
+                    self.cpu.regs()[crate::cpu::Cpu::LR],
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                let ring_i = std::sync::atomic::AtomicUsize::load(
+                    &crate::environment::GUEST_PC_RING_IDX,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                std::sync::atomic::AtomicU32::store(
+                    &crate::environment::GUEST_PC_RING[ring_i % 32],
+                    diag_pc,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                std::sync::atomic::AtomicUsize::store(
+                    &crate::environment::GUEST_PC_RING_IDX,
+                    ring_i.wrapping_add(1),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 match self.handle_cpu_state(state) {
                     ThreadNextAction::Continue => {}
                     ThreadNextAction::ReturnToHost => return,

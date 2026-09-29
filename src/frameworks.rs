@@ -39,6 +39,7 @@ pub mod core_audio;
 pub mod core_audio_types;
 pub mod core_bluetooth;
 pub mod core_foundation;
+pub mod contacts;
 pub mod core_graphics;
 pub mod core_image;
 pub mod core_location;
@@ -49,6 +50,7 @@ pub mod core_text;
 pub mod core_video;
 pub mod foundation;
 pub mod game_controller;
+pub mod javascript_core;
 pub mod game_kit;
 pub mod gl_kit;
 pub mod image_io;
@@ -56,10 +58,17 @@ pub mod libbz2;
 pub mod libicucore;
 pub mod libsqlite3;
 pub mod libxml2;
+pub mod pass_kit;
+pub mod safari_services;
 pub mod map_kit;
 pub mod media_player;
 pub mod media_toolbox;
+pub mod watch_connectivity;
+pub mod xsapitcui;
+pub mod photos;
+pub mod quick_look;
 pub mod message_ui;
+pub mod mopub;
 pub mod metal;
 pub mod mobile_core_services;
 pub mod openal;
@@ -89,6 +98,7 @@ pub struct State {
     openal: openal::State,
     opengles: opengles::State,
     uikit: uikit::State,
+    watch_connectivity: watch_connectivity::State,
     skynest: skynest::State,
 }
 

@@ -3,6 +3,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
+
 //! Stub for `CoreImage.framework/CoreImage`.
 //!
 //! CoreImage is the GPU-accelerated image-processing framework. iOS 5+
@@ -11,6 +12,8 @@
 //! often referenced from defensive `if (kCISomething != nil)` guards).
 //! Without a [crate::dyld::HostDylib] entry for these names, the linker
 //! leaves them NULL and the first dereference takes down the emulator.
+
+pub mod pipeline;
 
 use crate::dyld::{ConstantExports, FunctionExports, HostConstant};
 use crate::frameworks::core_graphics::CGFloat;

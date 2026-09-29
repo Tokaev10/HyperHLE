@@ -228,13 +228,13 @@ fn CFDictionaryContainsValue(
     false
 }
 
-fn CFDictionaryGetCount(env: &mut Environment, dict: CFDictionaryRef) -> CFIndex {
+pub fn CFDictionaryGetCount(env: &mut Environment, dict: CFDictionaryRef) -> CFIndex {
     let count: NSUInteger = msg![env; dict count];
     log_dbg!("CFDictionaryGetCount -> {}", count);
     count.try_into().unwrap()
 }
 
-fn CFDictionaryGetKeysAndValues(
+pub fn CFDictionaryGetKeysAndValues(
     env: &mut Environment,
     dict: CFDictionaryRef,
     keys: ConstPtr<MutVoidPtr>,

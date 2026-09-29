@@ -26,7 +26,7 @@ const kCGPathElementAddCurveToPoint: CGPathElementType = 3;
 const kCGPathElementCloseSubpath: CGPathElementType = 4;
 
 #[derive(Clone, Debug)]
-enum PathElement {
+pub(crate) enum PathElement {
     MoveTo(CGPoint),
     LineTo(CGPoint),
     QuadCurveTo {
@@ -42,9 +42,9 @@ enum PathElement {
 }
 
 #[derive(Default)]
-struct CGPathHostObject {
-    elements: Vec<PathElement>,
-    mutable: bool,
+pub(crate) struct CGPathHostObject {
+    pub(crate) elements: Vec<PathElement>,
+    pub(crate) mutable: bool,
 }
 impl HostObject for CGPathHostObject {}
 

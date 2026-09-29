@@ -128,6 +128,18 @@ fn get_audio_session_property_size(in_id: AudioSessionPropertyID) -> u32 {
     }
 }
 
+pub fn current_output_volume(env: &Environment) -> f32 {
+    env.framework_state
+        .audio_toolbox
+        .audio_session
+        .current_hardware_output_volume
+}
+pub fn set_current_output_volume(env: &mut Environment, volume: f32) {
+    env.framework_state
+        .audio_toolbox
+        .audio_session
+        .current_hardware_output_volume = volume.clamp(0.0, 1.0);
+}
 pub fn AudioSessionInitialize(
     _env: &mut Environment,
     _in_run_loop: CFRunLoopRef,

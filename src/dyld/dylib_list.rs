@@ -204,6 +204,8 @@ pub const ACCELERATE: super::HostDylib = super::HostDylib {
 /// The single list of host dylibs that the linker (and Objective-C runtime)
 /// searches through.
 pub const DYLIB_LIST: &[&super::HostDylib] = &[
+    &frameworks::mopub::DYLIB,
+    &frameworks::javascript_core::DYLIB,
     &libc::DYLIB,
     &objc::DYLIB,
     &crate::environment::app_picker::DYLIB, // Not a real library; special internal classes.
@@ -235,6 +237,9 @@ pub const DYLIB_LIST: &[&super::HostDylib] = &[
     &frameworks::address_book::DYLIB,
     &frameworks::accounts::DYLIB,
     &frameworks::game_controller::DYLIB,
+    &frameworks::contacts::DYLIB,
+    &frameworks::pass_kit::DYLIB,
+    &frameworks::safari_services::DYLIB,
     &CORE_AUDIO,
     &frameworks::media_toolbox::DYLIB,
     &frameworks::web_kit::DYLIB,
@@ -259,7 +264,10 @@ pub const DYLIB_LIST: &[&super::HostDylib] = &[
     &frameworks::core_bluetooth::DYLIB,
     &frameworks::gl_kit::DYLIB,
     &frameworks::image_io::DYLIB,
-    &SAFARI_SERVICES,
+    &frameworks::photos::DYLIB,
+    &frameworks::quick_look::DYLIB,
+    &frameworks::watch_connectivity::DYLIB,
+    &frameworks::xsapitcui::DYLIB,
 ];
 
 #[cfg(test)]

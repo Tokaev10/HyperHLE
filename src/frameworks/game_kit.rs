@@ -15,6 +15,7 @@
 pub mod ad_banner_view;
 pub mod fb_session;
 pub mod gk_achievement;
+pub mod gk_matchmaker;
 pub mod gk_challenge_event_handler;
 mod gk_leaderboard;
 pub mod gk_leaderboard_view_controller;
@@ -37,6 +38,7 @@ pub const CONSTANTS: ConstantExports =
 /// Per-process state for the GameKit framework.
 #[derive(Default)]
 pub struct State {
+    pub matchmaker: gk_matchmaker::State,
     pub local_player: gk_local_player::State,
     pub challenge_event_handler: gk_challenge_event_handler::State,
     pub turn_based_event_handler: gk_turn_based_event_handler::State,
@@ -50,6 +52,7 @@ pub const DYLIB: crate::dyld::HostDylib = crate::dyld::HostDylib {
         fb_session::CLASSES,
         gk_achievement::CLASSES,
         gk_challenge_event_handler::CLASSES,
+        gk_matchmaker::CLASSES,
         gk_turn_based_event_handler::CLASSES,
         gk_leaderboard::CLASSES,
         gk_leaderboard_view_controller::CLASSES,
