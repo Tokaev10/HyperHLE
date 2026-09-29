@@ -347,11 +347,24 @@ mod imp {
     }
 
     /// Install the diagnostic handlers for the fatal native signals.
+    ///
+    /// ANDROID: only SIGABRT is hooked. ART owns SIGSEGV/SIGBUS/SIGILL on
+    /// Android (null checks, stack overflow, JNI fatal errors), and JIT-host
+    /// interop means a host fault handler here can convert handled faults
+    /// into fatal ones — this handler landed in the same commit as
+    /// GLES2-game SIGSEGV regressions. Desktop gets the full set.
     pub fn install() {
         resolve_backtrace();
         let mut act: libc::sigaction = unsafe { std::mem::zeroed() };
         act.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
         act.sa_sigaction = handler as usize;
+        #[cfg(target_os = "android")]
+        {
+            unsafe {
+                libc::sigaction(libc::SIGABRT, &act, std::ptr::null_mut());
+            }
+        }
+        #[cfg(not(target_os = "android"))]
         for &sig in &[libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGABRT] {
             unsafe {
                 libc::sigaction(sig, &act, std::ptr::null_mut());

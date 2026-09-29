@@ -82,6 +82,13 @@ use std::path::PathBuf;
 // implementations), a workload that mimalloc handles measurably faster than
 // the platform malloc — in particular on Android, where every allocation
 // additionally goes through Scudo hardening.
+//
+// ANDROID EXCEPTION: allocator swaps inside a running ART process (JIT worker
+// threads, signal handlers, fork-within-signal diagnostics) were implicated
+// in native SIGSEGVs on GLES2 games (BioShock/Geometry Dash/Terraria) that
+// never faulted with the platform allocator. Android keeps the default
+// Scudo-hardened allocator; desktop platforms get mimalloc.
+#[cfg(not(target_os = "android"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

@@ -7,7 +7,7 @@
 use crate::dyld::FunctionExports;
 use crate::environment::Environment;
 use crate::export_c_func;
-use crate::libc::errno::{set_errno, EINVAL, EIO, ENOTSUP};
+use crate::libc::errno::{set_errno, EINVAL, EIO};
 use crate::libc::posix_io;
 use crate::libc::posix_io::{off_t, open_direct, FileDescriptor, SEEK_SET};
 use crate::mem::{ConstPtr, GuestUSize, MutVoidPtr, PAGE_SIZE_ALIGN_MASK};
@@ -121,19 +121,24 @@ fn munmap(env: &mut Environment, addr: MutVoidPtr, len: GuestUSize) -> i32 {
     log_dbg!("munmap({:?}, {})", addr, len);
 
     if len == 0 {
-        if let Some(&mapped_len) = env.libc_state.mmap.allocations.get(&addr) {
+        // Darwin returns EINVAL for `munmap(addr, 0)`, but several apps
+        // (e.g. the UE3-based BioShock port) call it this way in a loop to
+        // release cached buffers and treat any failure as fatal for their
+        // allocator bookkeeping. Be permissive: if the whole mapping at
+        // `addr` is known, release it in full (its recorded length is what
+        // the caller means); otherwise treat the call as a successful no-op.
+        // This matches Linux's munmap(NULL-adjacent) tolerance and keeps the
+        // guest allocator's state consistent.
+        if let Some(&expected_len) = env.libc_state.mmap.allocations.get(&addr) {
             log_dbg!(
-                "munmap({:?}, 0): releasing known {}-byte mapping",
+                "munmap({:?}, 0): zero length, unmapping whole {}-byte mapping",
                 addr,
-                mapped_len
+                expected_len
             );
             env.mem.free(addr);
             env.libc_state.mmap.allocations.remove(&addr);
         } else {
-            log_dbg!(
-                "munmap({:?}, 0): unknown mapping, treating as a no-op",
-                addr
-            );
+            log_dbg!("munmap({:?}, 0): unknown mapping, treating as no-op", addr);
         }
         set_errno(env, 0);
         return 0;
@@ -152,8 +157,7 @@ fn munmap(env: &mut Environment, addr: MutVoidPtr, len: GuestUSize) -> i32 {
         env.libc_state.mmap.allocations.remove(&addr);
         0 // success
     } else {
-        log_sampled!(
-            64,
+        log!(
             "Warning: munmap({:?}, {}): unknown mapping, returning -1",
             addr,
             len
@@ -163,10 +167,46 @@ fn munmap(env: &mut Environment, addr: MutVoidPtr, len: GuestUSize) -> i32 {
     }
 }
 
+// Darwin `madvise` advice values (sys/mman.h).
+const MADV_NORMAL: i32 = 0;
+const MADV_RANDOM: i32 = 1;
+const MADV_SEQUENTIAL: i32 = 2;
+const MADV_WILLNEED: i32 = 3;
+const MADV_DONTNEED: i32 = 4;
+const MADV_FREE: i32 = 5;
+const MADV_ZERO_WIRED_PAGES: i32 = 6;
+const MADV_FREE_REUSABLE: i32 = 7;
+const MADV_FREE_REUSE: i32 = 8;
+const MADV_CAN_REUSE: i32 = 9;
+
+/// Guest memory is a plain host allocation with no paging, so every advice
+/// is a hint we can safely ignore. Only the argument validation that a real
+/// kernel performs is emulated: unknown advice values and unaligned
+/// addresses fail with `EINVAL`.
 fn madvise(env: &mut Environment, addr: MutVoidPtr, len: GuestUSize, advice: i32) -> i32 {
-    log!("TODO: madvise({:?}, {}, {}) -> -1", addr, len, advice);
-    set_errno(env, ENOTSUP);
-    -1
+    log_dbg!("madvise({:?}, {}, {})", addr, len, advice);
+    match advice {
+        MADV_NORMAL
+        | MADV_RANDOM
+        | MADV_SEQUENTIAL
+        | MADV_WILLNEED
+        | MADV_DONTNEED
+        | MADV_FREE
+        | MADV_ZERO_WIRED_PAGES
+        | MADV_FREE_REUSABLE
+        | MADV_FREE_REUSE
+        | MADV_CAN_REUSE => {}
+        _ => {
+            set_errno(env, EINVAL);
+            return -1;
+        }
+    }
+    if addr.to_bits() & PAGE_SIZE_ALIGN_MASK != 0 {
+        set_errno(env, EINVAL);
+        return -1;
+    }
+    set_errno(env, 0);
+    0
 }
 
 fn shm_open(env: &mut Environment, name: ConstPtr<u8>, oflag: i32, mode: u32) -> i32 {
@@ -178,6 +218,16 @@ fn shm_open(env: &mut Environment, name: ConstPtr<u8>, oflag: i32, mode: u32) ->
     // Используем open_direct! Параметр mode для эмулятора здесь не нужен,
     // поэтому просто передаем env, name и oflag.
     open_direct(env, name, oflag)
+}
+
+/// `int shm_unlink(const char *name)`
+///
+/// POSIX shared-memory unlink: removes the named shared-memory object.
+/// Regions opened via `shm_open` are backed by our fs layer, where `unlink`
+/// already implements remove-on-last-close semantics. Missing regions return
+/// -1/ENOENT per POSIX.
+fn shm_unlink(env: &mut Environment, name: ConstPtr<u8>) -> i32 {
+    crate::libc::unistd::unlink(env, name)
 }
 
 fn mprotect(env: &mut Environment, addr: MutVoidPtr, len: GuestUSize, prot: i32) -> i32 {
@@ -243,11 +293,29 @@ fn munlock(env: &mut Environment, addr: ConstPtr<u8>, len: GuestUSize) -> i32 {
     0
 }
 
+/// `int msync(void *addr, size_t len, int flags)` — synchronize a mapped
+/// region with the file that backs it. touchHLE's `mmap` copies file
+/// content into a guest allocation and never writes it back, and guest
+/// memory is not paged, so there is nothing to flush: report success as
+/// a no-op (Darwin returns 0 on success; returning -1 would make guests
+/// that treat msync failures as fatal — e.g. engines persisting save
+/// data through mmap — abort their write path).
+///
+/// Reference: POSIX msync(2) — returns 0 on success, -1 with errno on
+/// failure.
+fn msync(env: &mut Environment, addr: MutVoidPtr, len: GuestUSize, flags: i32) -> i32 {
+    log_dbg!("msync({:?}, {}, {:#x}) -> 0 (no-op)", addr, len, flags);
+    set_errno(env, 0);
+    0
+}
+
 pub const FUNCTIONS: FunctionExports = &[
     export_c_func!(mmap(_, _, _, _, _, _)),
     export_c_func!(munmap(_, _)),
+    export_c_func!(msync(_, _, _)),
     export_c_func!(madvise(_, _, _)),
     export_c_func!(shm_open(_, _, _)),
+    export_c_func!(shm_unlink(_)),
     export_c_func!(mprotect(_, _, _)),
     export_c_func!(mlock(_, _)),
     export_c_func!(munlock(_, _)),

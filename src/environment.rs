@@ -176,6 +176,13 @@ pub struct Environment {
     /// Set to [true] when created using [Environment::new_without_app].
     pub dump_file: Option<std::fs::File>,
     pub is_app_picker: bool,
+    /// Guest-only termination request from the `exit`/`abort` family: observed
+    /// by the CPU loop after the host stub returns so no further guest
+    /// instruction runs on a `noreturn` path.
+    pub(crate) guest_termination_requested: bool,
+    /// Set when Unity reports its mandatory player archive is unavailable; the
+    /// `exit` family then ends the session instead of attempting recovery.
+    pub(crate) missing_unity_player_archive: Option<String>,
     pub(crate) active_host_function: Option<String>,
     yielder: *const Yielder<Environment, Environment>,
     // The amount of ticks to run for Some(value), or single-stepping for None.
@@ -929,6 +936,8 @@ let default_ipad = DeviceFamily::iPad2;
             udf_bypass_last: None,
             udf_bypass_count: 0,
             udf_log_counts: HashMap::new(),
+            guest_termination_requested: false,
+            missing_unity_player_archive: None,
             scheduler_watchdog: SchedulerWatchdog::default(),
             trainer: crate::trainer::Trainer::new(trainer_enabled),
             corruptor: crate::corrupt::Corruptor::default(),
@@ -1104,6 +1113,8 @@ let default_ipad = DeviceFamily::iPad2;
             udf_bypass_count: 0,
             udf_log_counts: HashMap::new(),
             scheduler_watchdog: SchedulerWatchdog::default(),
+            guest_termination_requested: false,
+            missing_unity_player_archive: None,
             trainer: crate::trainer::Trainer::new(false),
             corruptor: crate::corrupt::Corruptor::default(),
             main_thread_terminated: false,
@@ -1178,6 +1189,8 @@ let default_ipad = DeviceFamily::iPad2;
             udf_bypass_count: 0,
             udf_log_counts: HashMap::new(),
             scheduler_watchdog: SchedulerWatchdog::default(),
+            guest_termination_requested: false,
+            missing_unity_player_archive: None,
             trainer: crate::trainer::Trainer::new(false),
             corruptor: crate::corrupt::Corruptor::default(),
             main_thread_terminated: false,
@@ -1494,6 +1507,64 @@ let default_ipad = DeviceFamily::iPad2;
     }
 
     #[allow(dead_code)]
+    /// Guest-requested sleep. Keep its deadline in game time so changing
+    /// speed also affects waits already in progress. Host pacing uses sleep().
+    pub fn sleep_guest(&mut self, duration: Duration) {
+        let until = self.guest_clock.now().checked_add(duration).unwrap();
+        self.yield_thread(ThreadBlock::Sleeping(until));
+    }
+
+    /// Request that active guest execution returns through its host boundary.
+    ///
+    /// Linked libc functions use this when an `exit`/`abort` cannot be safely
+    /// unwound. The request is observed by the CPU loop after the host function
+    /// returns, so no guest instruction after a `noreturn` call is executed.
+    pub(crate) fn request_guest_termination(&mut self) {
+        self.guest_termination_requested = true;
+    }
+
+    /// Whether a linked guest termination function has requested session end.
+    pub(crate) fn is_guest_termination_requested(&self) -> bool {
+        self.guest_termination_requested
+    }
+
+    /// Remember that Unity's mandatory serialized player archive is unavailable.
+    ///
+    /// This records both a missing VFS node and an unreadable/empty archive
+    /// entry. The archive is not optional: once Unity has reported this failure
+    /// it calls `exit(1)` after partially initializing global state. Treating
+    /// that exit as a recoverable DRM-style exit leads to use-after-null and
+    /// bogus multi-gigabyte allocations, as the engine's cleanup path was not
+    /// designed to return to the app.
+    pub(crate) fn note_missing_unity_player_archive(&mut self, path: &str) {
+        let is_player_archive = path
+            .rsplit_once('/')
+            .is_some_and(|(parent, file)| {
+                file.eq_ignore_ascii_case("data.unity3d")
+                    && parent
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|component| component.eq_ignore_ascii_case("Data"))
+            });
+        if !is_player_archive || self.missing_unity_player_archive.is_some() {
+            return;
+        }
+
+        self.missing_unity_player_archive = Some(path.to_owned());
+        log!(
+            "Required Unity player archive {:?} is unavailable from the mounted \
+             bundle. A following guest termination will return to the host instead \
+             of resuming a \
+             half-initialized Unity engine.",
+            path
+        );
+    }
+
+    /// The unavailable Unity player archive, if a resource probe found one.
+    pub(crate) fn missing_unity_player_archive(&self) -> Option<&str> {
+        self.missing_unity_player_archive.as_deref()
+    }
+
     pub fn suspend_thread(&mut self, thread: ThreadId) {
         match &mut self.threads[thread].blocked_by {
             ThreadBlock::Suspended(count, _) => {
@@ -2832,15 +2903,12 @@ let default_ipad = DeviceFamily::iPad2;
                         assert!(cnt > 0);
                     }
                     ThreadBlock::FileObjectLock(file_ptr) => {
-                        let acquired = self.libc_state.stdio.try_acquire_file_object_lock(
-                            &mut self.mem,
-                            file_ptr,
-                            thread_id,
-                        );
-                        if acquired {
-                            self.threads[thread_id].blocked_by = ThreadBlock::NotBlocked;
-                            return thread_id;
-                        }
+                        // FILE locks are no-ops (flockfile is single-threaded
+                        // by convention here), so a thread parked on one is
+                        // always runnable.
+                        let _ = file_ptr;
+                        self.threads[thread_id].blocked_by = ThreadBlock::NotBlocked;
+                        return thread_id;
                     }
                 }
             }

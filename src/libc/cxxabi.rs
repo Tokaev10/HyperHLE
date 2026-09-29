@@ -104,7 +104,7 @@ fn __cxa_guard_abort(env: &mut Environment, guard: MutPtr<u8>) {
 
 const APP_CODE_LIMIT: u32 = 0x1000_0000;
 
-fn unwind_to_app_frame(env: &mut Environment) -> bool {
+pub(crate) fn unwind_to_app_frame(env: &mut Environment) -> bool {
     // The thread's stack typically lives at the top of the 4 GiB guest
     // address space (e.g. SP ≈ 0xffffee40). Use the recorded stack range
     // when available — otherwise fall back to "any non-zero, non-all-ones
